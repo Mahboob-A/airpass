@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirPass Room</title>
+    <link rel="stylesheet" href="/css/style.css">
+    <!-- QR Code generation from CDN as specified in frontend-doc.md -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"
+        integrity="sha512-CNgIRecGo7nphbeZ04Sc13ka07paqdeTu0c7vvuHqjD/sP0bNl1/z11k+pY81S0G5Yv1w1oEDD9g/2gqYfWbQ"
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+</head>
+
+<body>
+    <main class="container base-layout">
+        <header>
+            <h1>AirPass</h1>
+            <div id="status" class="status status-waiting">Initializing...</div>
+        </header>
+
+        <section id="room-info" class="card hidden">
+            <h2>Room Code</h2>
+            <div class="room-code-display" id="room-code">------</div>
+            <p>Waiting for peer to join...</p>
+            <div id="qr-container" class="qr-box"></div>
+            <a href="#" id="share-url" class="share-link">Share Link</a>
+        </section>
+
+        <section id="transfer-zone" class="card hidden">
+            <!-- File input hidden, triggered by button or drop -->
+            <input type="file" id="file-input" class="hidden">
+
+            <div id="drop-zone" class="drop-zone">
+                <p>Drag & Drop a file here, or click to select</p>
+                <button id="btn-select-file" class="btn secondary">Select File</button>
+            </div>
+
+            <!-- Displayed when file is staged for sending or receiving -->
+            <div id="file-info-card" class="file-info hidden">
+                <h3 id="file-name">filename.ext</h3>
+                <p><span id="file-size">0 MB</span> • <span id="file-type">application/octet-stream</span></p>
+
+                <!-- Actions shown for receiver when metadata arrives -->
+                <div id="file-actions" class="file-actions hidden">
+                    <button id="btn-accept" class="btn primary">Accept & Download</button>
+                    <button id="btn-reject" class="btn danger">Reject</button>
+                </div>
+            </div>
+
+            <!-- Transfer Progress UI -->
+            <div id="progress-container" class="progress-section hidden">
+                <div class="progress-stats">
+                    <span id="progress-percent">0%</span>
+                    <span id="bytes-transferred">0 / 0</span>
+                </div>
+                <div class="progress-bar-bg">
+                    <div id="progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+                </div>
+                <div class="progress-stats">
+                    <span id="transfer-speed">0 B/s</span>
+                    <span id="transfer-eta">—</span>
+                </div>
+            </div>
+
+            <!-- Overall room/transfer actions -->
+            <div class="room-actions mt-4">
+                <button id="btn-cancel" class="btn danger hidden">Cancel Transfer</button>
+                <button id="btn-leave" class="btn warning">Leave Room</button>
+            </div>
+        </section>
+
+        <!-- Error & Warn modals container -->
+        <div id="modal-container" class="modal-overlay hidden">
+            <div class="modal card">
+                <h3 id="modal-title">Warning</h3>
+                <p id="modal-message"></p>
+                <div class="modal-actions">
+                    <button id="btn-modal-ok" class="btn primary">OK</button>
+                    <button id="btn-modal-cancel" class="btn secondary hidden">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- App entry point for the room page -->
+    <script type="module" src="/js/room.js"></script>
+</body>
+
+</html>

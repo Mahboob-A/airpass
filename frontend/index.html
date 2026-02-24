@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirPass - Secure P2P File Transfer</title>
+    <!-- We will rely on vanilla CSS later, for now just semantic structure -->
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <main class="container base-layout">
+        <header>
+            <h1>AirPass</h1>
+            <p>Direct, secure, peer-to-peer file transfer. No servers keep your data.</p>
+        </header>
+
+        <section class="actions-section">
+            <div class="card">
+                <h2>Create a Room</h2>
+                <p>Start a new secure session to share files.</p>
+                <button id="btn-create-room" class="btn primary">Create Room</button>
+            </div>
+
+            <div class="card">
+                <h2>Join a Room</h2>
+                <p>Enter a 6-digit code to connect with a peer.</p>
+                <form id="join-form">
+                    <input type="text" id="input-room-code" placeholder="Enter 6-digit code" maxlength="6" pattern="[a-zA-Z0-9]{6}" required autocomplete="off">
+                    <button type="submit" id="btn-join-room" class="btn secondary">Join</button>
+                </form>
+            </div>
+        </section>
+        
+        <div id="status" class="status-waiting hidden">Idle</div>
+    </main>
+
+    <!-- App entry point for index -->
+    <script type="module" src="/js/app.js"></script>
+</body>
+</html>
