@@ -2,11 +2,13 @@
  * Room orchestration
  *
  * Ties together SignalingClient, PeerConnection, Transfer logic, and UI.
+ * Integrates Web Crypto E2E Encryption for file chunking.
  */
 import { SignalingClient } from './signaling.js'
 import { PeerConnection } from './peer.js'
 import * as transfer from './transfer.js'
 import * as ui from './ui.js'
+import { generateSalt, deriveKey, encryptChunk, decryptChunk, saltToBase64, saltFromBase64 } from './crypto.js'
 
 let signaling
 let peerConn
@@ -14,10 +16,15 @@ let isSender = false
 let currentFile = null
 let receiveState = null  // Holds download stream info for receiver
 
+let roomPassword = ''
+let sessionSalt = null
+let sessionKey = null
+
 document.addEventListener('DOMContentLoaded', async () => {
     const params = new URLSearchParams(window.location.search)
     const action = params.get('action')
     const joinCode = params.get('code')
+    roomPassword = params.get('password') || ''
 
     if (!action && !joinCode) {
         window.location.href = '/'
@@ -31,10 +38,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     ui.setStatus('connecting')
 
-    signaling.on('open', () => {
+    signaling.on('open', async () => {
         if (action === 'create') {
             isSender = true
-            signaling.send({ type: 'create-room' })
+            sessionSalt = generateSalt()
+            sessionKey = await deriveKey(roomPassword, sessionSalt)
+
+            const createMsg = { type: 'create-room' }
+            if (roomPassword) createMsg.password = roomPassword
+            signaling.send(createMsg)
         } else if (joinCode) {
             isSender = false
             signaling.send({ type: 'join-room', code: joinCode })
@@ -68,12 +80,34 @@ document.addEventListener('DOMContentLoaded', async () => {
         setupDragAndDrop()
     })
 
-    signaling.on('room-joined', (msg) => {
+    signaling.on('room-joined', async (msg) => {
         ui.toggleHidden('room-info', true)
-        ui.setStatus('waiting')
 
-        peerConn = new PeerConnection(signaling, { role: 'receiver' })
-        setupPeerConnection()
+        if (msg.password_required) {
+            const pwd = await ui.askForPassword('Password Required', 'This room is protected by a password.')
+            if (!pwd) {
+                window.location.href = '/'
+                return
+            }
+            roomPassword = pwd
+            signaling.send({ type: 'verify-password', password: pwd })
+        } else {
+            ui.setStatus('waiting')
+            peerConn = new PeerConnection(signaling, { role: 'receiver' })
+            setupPeerConnection()
+        }
+    })
+
+    signaling.on('password-result', (msg) => {
+        if (msg.valid) {
+            ui.setStatus('waiting')
+            peerConn = new PeerConnection(signaling, { role: 'receiver' })
+            setupPeerConnection()
+        } else {
+            ui.showModal('Error', 'Incorrect password.', false).then(() => {
+                window.location.href = '/'
+            })
+        }
     })
 
     signaling.on('peer-joined', () => {
@@ -113,7 +147,14 @@ function setupPeerConnection() {
             await handleControlMessage(JSON.parse(event.data))
         } else {
             // Binary chunk received
-            await handleBinaryChunk(event.data)
+            try {
+                await handleBinaryChunk(event.data)
+            } catch (err) {
+                console.error("Failed to decrypt or process chunk:", err)
+                ui.setStatus('failed')
+                ui.showModal('Decryption Error', 'Failed to decrypt chunk. Password may be incorrect or data was tampered with.')
+                peerConn.dataChannel.close()
+            }
         }
     }
 }
@@ -122,6 +163,16 @@ function setupPeerConnection() {
 
 async function handleControlMessage(msg) {
     if (msg.type === 'file-metadata' && !isSender) {
+        // Derive session key
+        try {
+            sessionSalt = saltFromBase64(msg.salt)
+            sessionKey = await deriveKey(roomPassword, sessionSalt)
+        } catch (err) {
+            ui.showModal('Error', 'Failed to establish encryption session key.')
+            peerConn.dataChannel.send(JSON.stringify({ type: 'file-reject' }))
+            return
+        }
+
         // Receiver got file info
         ui.toggleHidden('transfer-zone', false)
         ui.showFileInfo(msg)
@@ -165,6 +216,7 @@ async function handleControlMessage(msg) {
             const speedSamples = []
 
             await transfer.sendFile(peerConn.dataChannel, currentFile, {
+                encryptChunk: (chunk) => encryptChunk(chunk, sessionKey),
                 onProgress: (sent, total) => {
                     speedSamples.push({ bytes: sent, time: Date.now() })
                     if (speedSamples.length > 50) speedSamples.shift()
@@ -195,7 +247,10 @@ async function handleBinaryChunk(data) {
     // We expect the chunks exactly as receiveChunk defines
     const totalChunks = Math.ceil(metadata.size / transfer.CHUNK_SIZE)
 
-    const result = await transfer.receiveChunk(data, chunkStore, { totalChunks })
+    const result = await transfer.receiveChunk(data, chunkStore, {
+        totalChunks,
+        decryptChunk: (chunk) => decryptChunk(chunk, sessionKey)
+    })
 
     // Process chunk based on strategy
     const rawChunk = chunkStore[result.index]
@@ -280,7 +335,8 @@ function handleFileSelection(file) {
         type: 'file-metadata',
         name: file.name,
         size: file.size,
-        mimeType: file.type
+        mimeType: file.type,
+        salt: saltToBase64(sessionSalt)
     }))
 }
 

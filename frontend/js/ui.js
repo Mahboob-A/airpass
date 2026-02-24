@@ -192,6 +192,43 @@ export function showModal(title, message, showCancel = false) {
     })
 }
 
+export function askForPassword(title, message) {
+    return new Promise(resolve => {
+        const modal = document.getElementById('modal-container')
+        document.getElementById('modal-title').textContent = title
+        document.getElementById('modal-message').textContent = message
+
+        const input = document.getElementById('modal-input')
+        input.classList.remove('hidden')
+        input.value = ''
+
+        const btnOk = document.getElementById('btn-modal-ok')
+        const btnCancel = document.getElementById('btn-modal-cancel')
+
+        btnCancel.classList.remove('hidden')
+        modal.classList.remove('hidden')
+
+        const clean = () => {
+            modal.classList.add('hidden')
+            input.classList.add('hidden')
+            btnOk.removeEventListener('click', onOk)
+            btnCancel.removeEventListener('click', onCancel)
+        }
+
+        const onOk = () => { clean(); resolve(input.value) }
+        const onCancel = () => { clean(); resolve(null) }
+
+        btnOk.addEventListener('click', onOk)
+        btnCancel.addEventListener('click', onCancel)
+
+        // Allow user to hit Enter
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') onOk()
+        })
+        input.focus()
+    })
+}
+
 export function showBrowserWarning(message) {
     return showModal("Memory Warning", message, true)
 }

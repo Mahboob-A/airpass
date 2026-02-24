@@ -10,9 +10,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ── Create Room ──────────────────────────────────────────────────
     btnCreate.addEventListener('click', () => {
-        // Redirect to room.html with create action
-        // room.html will handle WebSocket connection and room creation
-        window.location.href = '/room.html?action=create';
+        const pwd = document.getElementById('input-create-password')?.value.trim();
+        let url = '/room.html?action=create';
+        if (pwd) url += `&password=${encodeURIComponent(pwd)}`;
+        window.location.href = url;
     });
 
     // ── Join Room ────────────────────────────────────────────────────
