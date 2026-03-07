@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Joining AirPass Room...</title>
+    <script>
+        // Extract room code from URL path: /join/X7K2P9
+        const parts = window.location.pathname.split('/')
+        const code = parts[parts.length - 1] || parts[parts.length - 2]
+        if (code && code.length === 6) {
+            window.location.replace('/room.html?code=' + encodeURIComponent(code))
+        } else {
+            window.location.replace('/')
+        }
+    </script>
+</head>
+
+<body></body>
+
+</html>

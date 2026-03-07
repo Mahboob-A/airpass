@@ -489,25 +489,26 @@ describe('PeerConnection - Initiator (Sender)', () => {
  * @module peer
  */
 
-const DATA_CHANNEL_LABEL = 'file-transfer'
+const CONTROL_CHANNEL_LABEL = 'p2p-control'
 
 export class PeerConnection {
   /**
    * @param {import('./signaling.js').SignalingClient} signaling
-   * @param {{ role: 'sender' | 'receiver', iceConfig?: object }} options
+   * @param {{ role: 'initiator' | 'responder', iceConfig?: object }} options
    */
   constructor(signaling, { role, iceConfig = null }) {
     this._signaling = signaling
     this._role = role
     this._pc = null
-    this._dataChannel = null
+    this._controlChannel = null
     this._remoteDescriptionSet = false
     this._iceCandidateQueue = []    // Queue for candidates arriving early
 
-    // Callbacks — set by the caller (room.js / join.js orchestration)
-    this.onDataChannelOpen = null         // () => void
-    this.onDataChannelMessage = null      // (event) => void
-    this.onConnectionStateChange = null   // (state: string) => void
+    // Callbacks — set by the caller (room.js orchestration)
+    this.onControlChannelOpen = null         // () => void
+    this.onControlMessage = null             // (event) => void
+    this.onTransferChannelOpen = null        // (transferId, channel) => void
+    this.onConnectionStateChange = null      // (state: string) => void
 
     this._init(iceConfig)
   }
@@ -527,22 +528,22 @@ export class PeerConnection {
 
     this._pc = new RTCPeerConnection(iceConfig)
 
-    // Sender creates the DataChannel
-    if (this._role === 'sender') {
-      this._dataChannel = this._pc.createDataChannel(DATA_CHANNEL_LABEL, {
-        ordered: true,
-        // maxRetransmits: null → reliable delivery (unlimited retransmits)
-        // This is critical for file transfer integrity
-      })
-      this._setupDataChannelHandlers(this._dataChannel)
-    }
+    // CRITICAL: Both peers independently allocate the Control Channel.
+    // Using `negotiated: true, id: 0` guarantees the channel is ready on both
+    // ends instantly, bypassing the `ondatachannel` listener race conditions.
+    this._controlChannel = this._pc.createDataChannel(CONTROL_CHANNEL_LABEL, {
+      ordered: true,
+      negotiated: true,
+      id: 0
+    })
+    this._setupControlChannelHandlers(this._controlChannel)
 
-    // Receiver receives the DataChannel
+    // Listen for new dynamic DataChannels (used strictly for individual file chunks)
+    // Backpressure for concurrent channels relies on the browser's SCTP stack 
+    // respecting the `bufferedAmountLowThreshold` on each channel.
     this._pc.ondatachannel = (event) => {
-      if (event.channel.label === DATA_CHANNEL_LABEL) {
-        this._dataChannel = event.channel
-        this._setupDataChannelHandlers(this._dataChannel)
-      }
+      const transferId = event.channel.label
+      this.onTransferChannelOpen?.(transferId, event.channel)
     }
 
     // Trickle ICE: send candidates as they are discovered

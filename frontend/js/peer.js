@@ -16,25 +16,28 @@
  * @module peer
  */
 
-const DATA_CHANNEL_LABEL = 'file-transfer'
+import { BACKEND_ORIGIN } from './config.js'
+
+const CONTROL_CHANNEL_LABEL = 'p2p-control'
 
 export class PeerConnection {
     /**
      * @param {import('./signaling.js').SignalingClient} signaling
-     * @param {{ role: 'sender' | 'receiver', iceConfig?: object }} options
+     * @param {{ role: 'initiator' | 'responder', iceConfig?: object }} options
      */
     constructor(signaling, { role, iceConfig = null }) {
         this._signaling = signaling
         this._role = role
         this._pc = null
-        this._dataChannel = null
+        this._controlChannel = null
         this._remoteDescriptionSet = false
         this._iceCandidateQueue = []    // Queue for candidates arriving early
 
-        // Callbacks — set by the caller (room.js / join.js orchestration)
-        this.onDataChannelOpen = null         // () => void
-        this.onDataChannelMessage = null      // (event) => void
-        this.onConnectionStateChange = null   // (state: string) => void
+        // Callbacks — set by the caller (room.js orchestration)
+        this.onControlChannelOpen = null         // () => void
+        this.onControlMessage = null             // (event) => void
+        this.onTransferChannelOpen = null        // (transferId, channel) => void
+        this.onConnectionStateChange = null      // (state: string) => void
 
         this._init(iceConfig)
     }
@@ -42,34 +45,31 @@ export class PeerConnection {
     // ── Public API ───────────────────────────────────────────
 
     /**
-     * Fetch ICE config from server and initialize the RTCPeerConnection.
-     * Must be called before createOffer() or before handling an incoming offer.
+     * Initialize the RTCPeerConnection using the pre-fetched ICE config.
      *
-     * @param {object|null} iceConfig - Pre-fetched config, or null to fetch now
+     * @param {object} iceConfig - Pre-fetched config MUST be passed now.
      */
-    async _init(iceConfig = null) {
+    _init(iceConfig) {
         if (!iceConfig) {
-            iceConfig = await fetchIceConfig()
+            console.error("Critical: ICE config is required synchronously to prevent WebRTC race conditions.")
+            return
         }
 
         this._pc = new RTCPeerConnection(iceConfig)
 
-        // Sender creates the DataChannel
-        if (this._role === 'sender') {
-            this._dataChannel = this._pc.createDataChannel(DATA_CHANNEL_LABEL, {
-                ordered: true,
-                // maxRetransmits: null → reliable delivery (unlimited retransmits)
-                // This is critical for file transfer integrity
-            })
-            this._setupDataChannelHandlers(this._dataChannel)
-        }
+        // Both peers create the Control Channel pre-negotiated
+        this._controlChannel = this._pc.createDataChannel(CONTROL_CHANNEL_LABEL, {
+            negotiated: true,
+            id: 0,
+            ordered: true,
+        })
+        this._setupControlChannelHandlers(this._controlChannel)
 
-        // Receiver receives the DataChannel
+        // Listen for new DataChannels (only dynamic transfer channels will trigger this now)
         this._pc.ondatachannel = (event) => {
-            if (event.channel.label === DATA_CHANNEL_LABEL) {
-                this._dataChannel = event.channel
-                this._setupDataChannelHandlers(this._dataChannel)
-            }
+            event.channel.binaryType = 'arraybuffer'
+            const transferId = event.channel.label
+            this.onTransferChannelOpen?.(transferId, event.channel)
         }
 
         // Trickle ICE: send candidates as they are discovered
@@ -127,18 +127,29 @@ export class PeerConnection {
     }
 
     /**
-     * Get the DataChannel. Returns null if not yet open.
+     * Get the Control Channel. Returns null if not yet open.
      * @returns {RTCDataChannel|null}
      */
-    get dataChannel() {
-        return this._dataChannel
+    get controlChannel() {
+        return this._controlChannel
     }
 
     /**
-     * Close the peer connection and data channel.
+     * Create a new dedicated File Transfer channel. Both initiator & responder can do this.
+     * @param {string} transferId 
+     * @returns {RTCDataChannel}
+     */
+    createTransferChannel(transferId) {
+        return this._pc.createDataChannel(transferId, {
+            ordered: true
+        })
+    }
+
+    /**
+     * Close the peer connection.
      */
     close() {
-        this._dataChannel?.close()
+        this._controlChannel?.close()
         this._pc?.close()
     }
 
@@ -184,17 +195,18 @@ export class PeerConnection {
             try {
                 await this._pc.addIceCandidate(candidate)
             } catch (err) {
-                console.debug('PeerConnection: flushing candidate error:', err)
+                console.error('Failed to add queued candidates:', err)
             }
         }
     }
 
-    _setupDataChannelHandlers(channel) {
+    _setupControlChannelHandlers(channel) {
         channel.onopen = () => {
-            this.onDataChannelOpen?.()
+            this.onControlChannelOpen?.()
         }
+
         channel.onmessage = (event) => {
-            this.onDataChannelMessage?.(event)
+            this.onControlMessage?.(event)
         }
         channel.onerror = (event) => {
             console.error('DataChannel error:', event)
@@ -220,7 +232,7 @@ export class PeerConnection {
  */
 export async function fetchIceConfig() {
     try {
-        const resp = await fetch('/api/ice-config')
+        const resp = await fetch(BACKEND_ORIGIN + '/api/ice-config')
         if (!resp.ok) throw new Error(`ICE config fetch failed: ${resp.status}`)
         return await resp.json()
     } catch (err) {

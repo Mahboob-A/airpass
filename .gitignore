@@ -32,3 +32,9 @@ yarn-error.log*
 *.swp
 *.swo
 
+
+# --- Security ---
+ssl/certs/*.pem
+*.key
+*.crt
+

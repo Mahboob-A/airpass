@@ -1,6 +1,7 @@
 /**
  * Application entry point for index.html (Landing Page)
  */
+import { BACKEND_ORIGIN } from './config.js'
 
 document.addEventListener('DOMContentLoaded', () => {
     const btnCreate = document.getElementById('btn-create-room');
@@ -28,8 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
             status.className = 'status status-connecting';
 
             // Validate the code with the backend HTTP API before navigating
-            const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
-            const res = await fetch(`${protocol}//${window.location.host}/api/room/${code}`);
+            const res = await fetch(`${BACKEND_ORIGIN}/api/room/${code}`);
 
             if (!res.ok) {
                 if (res.status === 404) throw new Error('Room not found or expired.');

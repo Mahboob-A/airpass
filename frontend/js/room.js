@@ -4,21 +4,35 @@
  * Ties together SignalingClient, PeerConnection, Transfer logic, and UI.
  * Integrates Web Crypto E2E Encryption for file chunking.
  */
+import { WS_ORIGIN } from './config.js'
 import { SignalingClient } from './signaling.js'
-import { PeerConnection } from './peer.js'
+import { PeerConnection, fetchIceConfig } from './peer.js'
 import * as transfer from './transfer.js'
 import * as ui from './ui.js'
 import { generateSalt, deriveKey, encryptChunk, decryptChunk, saltToBase64, saltFromBase64 } from './crypto.js'
 
 let signaling
 let peerConn
-let isSender = false
-let currentFile = null
-let receiveState = null  // Holds download stream info for receiver
-
+let isInitiator = false
 let roomPassword = ''
-let sessionSalt = null
-let sessionKey = null
+let iceConfig = null
+let expiryInterval = null
+let roomExpired = false
+
+const ROOM_EXPIRY_MS = 30 * 60 * 1000
+const EXPIRY_WARN_AT_MS = 10 * 60 * 1000
+
+// Replace singleton state with a Map of active transfers
+// Map keys: transferId (UUID)
+// Map values: { role, file, metadata, strategy, chunkStore, speedSamples... }
+const activeTransfers = new Map()
+
+const uuidv4 = () => {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+        var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+}
 
 document.addEventListener('DOMContentLoaded', async () => {
     const params = new URLSearchParams(window.location.search)
@@ -31,42 +45,45 @@ document.addEventListener('DOMContentLoaded', async () => {
         return
     }
 
-    // Connect WebSocket
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws/p2p`
-    signaling = new SignalingClient(wsUrl)
-
     ui.setStatus('connecting')
+
+    // Fetch ICE config BEFORE opening the WebSocket so that all event
+    // handlers are registered synchronously after the constructor.
+    // Otherwise the 'open' event can fire during the await and be missed.
+    iceConfig = await fetchIceConfig()
+
+    const wsUrl = `${WS_ORIGIN}/ws/p2p`
+    signaling = new SignalingClient(wsUrl)
 
     signaling.on('open', async () => {
         if (action === 'create') {
-            isSender = true
-            sessionSalt = generateSalt()
-            sessionKey = await deriveKey(roomPassword, sessionSalt)
-
+            isInitiator = true
             const createMsg = { type: 'create-room' }
             if (roomPassword) createMsg.password = roomPassword
             signaling.send(createMsg)
         } else if (joinCode) {
-            isSender = false
+            isInitiator = false
             signaling.send({ type: 'join-room', code: joinCode })
         }
     })
 
     signaling.on('error', (err) => {
+        if (err.code === 'ROOM_NOT_FOUND') {
+            _handleRoomExpiry()
+            return
+        }
         ui.setStatus('failed')
         ui.showModal('Error', err.message || 'Connection lost.')
     })
 
     signaling.on('close', () => {
-        // If it wasn't a planned close
+        if (roomExpired) return
         const statusEl = document.getElementById('status')
-        if (!statusEl.textContent.includes('complete')) {
-            ui.setStatus('failed')
-        }
+        if (statusEl.textContent.includes('complete')) return
+        const pcState = peerConn?._pc?.iceConnectionState
+        if (pcState === 'connected' || pcState === 'completed') return
+        ui.setStatus('failed')
     })
-
-    // ── Incoming Signaling Events ────────────────────────────────────
 
     signaling.on('room-created', (msg) => {
         ui.showRoomCode(msg.code)
@@ -75,15 +92,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         ui.toggleHidden('room-info', false)
         ui.setStatus('waiting')
 
-        peerConn = new PeerConnection(signaling, { role: 'sender' })
+        peerConn = new PeerConnection(signaling, { role: 'initiator', iceConfig: getEffectiveIceConfig() })
         setupPeerConnection()
         setupDragAndDrop()
+        startExpiryTimer()
+        _updateRelayToggleVisibility()
     })
 
     signaling.on('room-joined', async (msg) => {
-        ui.toggleHidden('room-info', true)
+        const currentUrl = window.location.href.split('?')[0] + '?code=' + joinCode
+        ui.showRoomCode(joinCode)
+        ui.showShareUrl(currentUrl)
+        ui.setRoomHelpText('Connected. Waiting for peer...')
+        ui.toggleHidden('room-info', false)
+        ui.toggleHidden('qr-wrapper', true)
 
-        if (msg.password_required) {
+        startExpiryTimer()
+        _updateRelayToggleVisibility()
+
+        if (msg.passwordRequired) {
             const pwd = await ui.askForPassword('Password Required', 'This room is protected by a password.')
             if (!pwd) {
                 window.location.href = '/'
@@ -93,16 +120,18 @@ document.addEventListener('DOMContentLoaded', async () => {
             signaling.send({ type: 'verify-password', password: pwd })
         } else {
             ui.setStatus('waiting')
-            peerConn = new PeerConnection(signaling, { role: 'receiver' })
+            peerConn = new PeerConnection(signaling, { role: 'responder', iceConfig: getEffectiveIceConfig() })
             setupPeerConnection()
+            setupDragAndDrop()
         }
     })
 
     signaling.on('password-result', (msg) => {
         if (msg.valid) {
             ui.setStatus('waiting')
-            peerConn = new PeerConnection(signaling, { role: 'receiver' })
+            peerConn = new PeerConnection(signaling, { role: 'responder', iceConfig: getEffectiveIceConfig() })
             setupPeerConnection()
+            setupDragAndDrop()
         } else {
             ui.showModal('Error', 'Incorrect password.', false).then(() => {
                 window.location.href = '/'
@@ -112,7 +141,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     signaling.on('peer-joined', () => {
         ui.setStatus('connecting')
-        peerConn.createOffer() // WebRTC initiator (sender) creates offer
+        peerConn.createOffer()
     })
 
     signaling.on('signal', (payload) => {
@@ -121,7 +150,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     signaling.on('peer-left', () => {
         ui.setStatus('cancelled')
-        ui.showModal('Disconnected', 'The other peer left the room.')
+        ui.showModal('Disconnected', 'The other peer left the room.', false).then(() => {
+            window.location.href = '/'
+        })
         peerConn?.close()
     })
 })
@@ -135,25 +166,33 @@ function setupPeerConnection() {
         }
     }
 
-    peerConn.onDataChannelOpen = () => {
+    peerConn.onControlChannelOpen = () => {
         ui.setStatus('connected')
-        if (isSender) {
-            ui.toggleHidden('transfer-zone', false)
+        ui.toggleHidden('ip-notice', false)
+        ui.toggleHidden('transfer-zone', false)
+        ui.toggleHidden('queues-container', false)
+        const relayToggle = document.getElementById('relay-only')
+        if (relayToggle) relayToggle.disabled = true
+    }
+
+    peerConn.onControlMessage = async (event) => {
+        if (typeof event.data === 'string') {
+            await handleControlMessage(JSON.parse(event.data))
         }
     }
 
-    peerConn.onDataChannelMessage = async (event) => {
-        if (typeof event.data === 'string') {
-            await handleControlMessage(JSON.parse(event.data))
-        } else {
-            // Binary chunk received
+    // When the sender opens a dynamic channel, the receiver gets it here:
+    peerConn.onTransferChannelOpen = (transferId, channel) => {
+        const state = activeTransfers.get(transferId)
+        if (!state) return
+
+        channel.onmessage = async (event) => {
             try {
-                await handleBinaryChunk(event.data)
+                await handleBinaryChunk(transferId, event.data)
             } catch (err) {
                 console.error("Failed to decrypt or process chunk:", err)
-                ui.setStatus('failed')
-                ui.showModal('Decryption Error', 'Failed to decrypt chunk. Password may be incorrect or data was tampered with.')
-                peerConn.dataChannel.close()
+                ui.updateQueueItemStatus(transferId, 'Decryption Error')
+                channel.close()
             }
         }
     }
@@ -162,126 +201,191 @@ function setupPeerConnection() {
 // ── Control Message Handling ─────────────────────────────────────
 
 async function handleControlMessage(msg) {
-    if (msg.type === 'file-metadata' && !isSender) {
-        // Derive session key
-        try {
-            sessionSalt = saltFromBase64(msg.salt)
-            sessionKey = await deriveKey(roomPassword, sessionSalt)
-        } catch (err) {
-            ui.showModal('Error', 'Failed to establish encryption session key.')
-            peerConn.dataChannel.send(JSON.stringify({ type: 'file-reject' }))
-            return
-        }
+    if (msg.type === 'file-metadata') {
+        const { id, name, size, mimeType, salt } = msg
 
-        // Receiver got file info
-        ui.toggleHidden('transfer-zone', false)
-        ui.showFileInfo(msg)
-
-        // Select download strategy BEFORE accepting (to show RAM warning if necessary)
-        const strategy = await transfer.selectDownloadStrategy(msg.name, msg.size)
-
-        if (strategy.showWarning) {
-            const proceed = await ui.showBrowserWarning(strategy.warningMessage)
-            if (!proceed) {
-                peerConn.dataChannel.send(JSON.stringify({ type: 'file-reject' }))
+        let sessionKey = null
+        if (salt && roomPassword) {
+            try {
+                const sessionSalt = saltFromBase64(salt)
+                sessionKey = await deriveKey(roomPassword, sessionSalt)
+            } catch (err) {
+                ui.showModal('Error', 'Failed to establish encryption session key.')
+                peerConn.controlChannel.send(JSON.stringify({ type: 'file-reject', id }))
                 return
             }
         }
 
-        const accepted = await ui.waitForFileAcceptance()
-        if (accepted) {
-            receiveState = {
-                metadata: msg,
-                strategy,
-                chunkStore: [],
-                chunksReceived: 0,
-                bytesReceived: 0,
-                startTime: Date.now(),
-                speedSamples: []
-            }
-            ui.setStatus('transferring')
-            ui.showProgressContainer(true)
-            peerConn.dataChannel.send(JSON.stringify({ type: 'file-accept' }))
+        ui.addQueueItem(id, { name, size, mimeType }, 'receiving')
+
+        const state = {
+            role: 'receiving',
+            metadata: msg,
+            strategy: null,
+            sessionKey,
+            chunkStore: [],
+            chunksReceived: 0,
+            bytesReceived: 0,
+            startTime: 0,
+            speedSamples: []
+        }
+        activeTransfers.set(id, state)
+
+        const autoDownload = document.getElementById('auto-download')?.checked
+
+        let accepted = false
+        _bindCancelButton(id)
+
+        if (autoDownload) {
+            const actions = document.getElementById(`actions-${id}`)
+            if (actions) actions.classList.add('hidden')
+            accepted = true
         } else {
-            peerConn.dataChannel.send(JSON.stringify({ type: 'file-reject' }))
+            accepted = await ui.waitForQueueItemAcceptance(id)
         }
-    }
-    else if (msg.type === 'file-accept' && isSender) {
-        // Receiver accepted, start sending
-        ui.setStatus('transferring')
-        ui.showProgressContainer(true)
 
-        try {
-            const startTime = Date.now()
-            const speedSamples = []
+        if (accepted) {
+            const strategy = await transfer.selectDownloadStrategy(name, size)
 
-            await transfer.sendFile(peerConn.dataChannel, currentFile, {
-                encryptChunk: (chunk) => encryptChunk(chunk, sessionKey),
-                onProgress: (sent, total) => {
-                    speedSamples.push({ bytes: sent, time: Date.now() })
-                    if (speedSamples.length > 50) speedSamples.shift()
-                    const stats = transfer.calculateProgress(sent, total, startTime, speedSamples)
-                    ui.updateProgress(stats)
+            if (strategy.showWarning) {
+                const proceed = await ui.showBrowserWarning(strategy.warningMessage)
+                if (!proceed) {
+                    ui.updateQueueItemStatus(id, 'Rejected')
+                    peerConn.controlChannel.send(JSON.stringify({ type: 'file-reject', id }))
+                    return
                 }
-            })
-            ui.setStatus('complete')
-        } catch (err) {
-            console.error(err)
-            ui.setStatus('failed')
-            ui.showModal('Upload Error', err.message)
+            }
+
+            state.strategy = strategy
+            state.startTime = Date.now()
+
+            ui.updateQueueItemStatus(id, 'Transferring...')
+            peerConn.controlChannel.send(JSON.stringify({ type: 'file-accept', id }))
+        } else {
+            ui.updateQueueItemStatus(id, 'Rejected')
+            peerConn.controlChannel.send(JSON.stringify({ type: 'file-reject', id }))
         }
     }
-    else if (msg.type === 'file-reject' && isSender) {
-        ui.showModal('Rejected', 'The receiver declined the file.')
-        currentFile = null
+    else if (msg.type === 'file-accept') {
+        const id = msg.id
+        const state = activeTransfers.get(id)
+        if (!state || !state.file) return
+
+        ui.updateQueueItemStatus(id, 'Transferring...')
+        state.startTime = Date.now()
+
+        // Sender creates the dynamic channel!
+        const channel = peerConn.createTransferChannel(id)
+
+        channel.onopen = async () => {
+            try {
+                await transfer.sendFile(channel, state.file, {
+                    encryptChunk: state.sessionKey ? (chunk) => encryptChunk(chunk, state.sessionKey) : null,
+                    onCancel: () => state.cancelled,
+                    onProgress: (sent, total) => {
+                        state.bytesSent = sent
+                        state.speedSamples.push({ bytes: sent, time: Date.now() })
+                        if (state.speedSamples.length > 50) state.speedSamples.shift()
+                        const stats = transfer.calculateProgress(sent, total, state.startTime, state.speedSamples)
+                        ui.updateQueueItemProgress(id, stats)
+                        _updateGlobalMetrics()
+                    }
+                })
+                ui.updateQueueItemStatus(id, 'Done')
+            } catch (err) {
+                console.error(err)
+                ui.updateQueueItemStatus(id, 'Upload Error')
+            }
+        }
+    }
+    else if (msg.type === 'file-reject') {
+        ui.updateQueueItemStatus(msg.id, 'Rejected')
+    }
+    else if (msg.type === 'transfer-cancelled') {
+        const id = msg.id
+        const state = activeTransfers.get(id)
+        if (state) {
+            state.cancelled = true
+            ui.updateQueueItemStatus(id, 'Cancelled')
+            activeTransfers.delete(id)
+        }
     }
 }
 
 // ── Binary Chunk Handling (Receiver) ─────────────────────────────
 
-async function handleBinaryChunk(data) {
-    if (!receiveState) return
+async function handleBinaryChunk(id, data) {
+    const state = activeTransfers.get(id)
+    if (!state) return
 
-    const { chunkStore, metadata, strategy } = receiveState
+    const { chunkStore, metadata, strategy, sessionKey } = state
 
-    // We expect the chunks exactly as receiveChunk defines
     const totalChunks = Math.ceil(metadata.size / transfer.CHUNK_SIZE)
 
     const result = await transfer.receiveChunk(data, chunkStore, {
         totalChunks,
-        decryptChunk: (chunk) => decryptChunk(chunk, sessionKey)
+        decryptChunk: sessionKey ? (chunk) => decryptChunk(chunk, sessionKey) : null
     })
 
-    // Process chunk based on strategy
-    const rawChunk = chunkStore[result.index]
-
-    // For streams (strategy 2 & 3), we write it immediately and free the memory
+    // Sequential Write Logic for StreamSaver / File System
     if (strategy.writer) {
-        await strategy.writer.write(new Uint8Array(rawChunk))
-        chunkStore[result.index] = null // Free memory!
-    }
+        if (state.nextChunkToWrite === undefined) state.nextChunkToWrite = 0;
 
-    // Update progress UI
-    receiveState.chunksReceived += 1
-    receiveState.bytesReceived += rawChunk.byteLength
-    receiveState.speedSamples.push({ bytes: receiveState.bytesReceived, time: Date.now() })
-    if (receiveState.speedSamples.length > 50) receiveState.speedSamples.shift()
+        // Try writing any sequential chunks we have buffered
+        while (chunkStore[state.nextChunkToWrite]) {
+            const rawChunk = chunkStore[state.nextChunkToWrite]
 
-    const stats = transfer.calculateProgress(
-        receiveState.bytesReceived,
-        metadata.size,
-        receiveState.startTime,
-        receiveState.speedSamples
-    )
-    ui.updateProgress(stats)
+            try {
+                // Await the write to apply backpressure to the browser's SCTP buffer
+                await strategy.writer.write(new Uint8Array(rawChunk))
+            } catch (err) {
+                console.error('Data writing error:', err)
+                ui.updateQueueItemStatus(id, 'Write Error')
+                return
+            }
 
-    // Complete?
-    if (receiveState.chunksReceived === totalChunks) {
-        ui.setStatus('complete')
-        if (strategy.writer) {
-            await strategy.writer.close()
-        } else if (strategy.type === 'blob') {
-            // Memory strategy: combine array of ArrayBuffers into a Blob
+            state.bytesReceived += rawChunk.byteLength
+            chunkStore[state.nextChunkToWrite] = null // Free memory
+            state.nextChunkToWrite++
+            state.chunksReceived++
+
+            // Progress Update inside sequential write loop
+            state.speedSamples.push({ bytes: state.bytesReceived, time: Date.now() })
+            if (state.speedSamples.length > 50) state.speedSamples.shift()
+
+            const stats = transfer.calculateProgress(
+                state.bytesReceived,
+                metadata.size,
+                state.startTime,
+                state.speedSamples
+            )
+            ui.updateQueueItemProgress(id, stats)
+            _updateGlobalMetrics()
+
+            if (state.chunksReceived === totalChunks) {
+                ui.updateQueueItemStatus(id, 'Done')
+                await strategy.writer.close().catch(console.error)
+            }
+        }
+    } else {
+        // Blob fallback (in-memory)
+        state.chunksReceived++
+        const rawChunk = chunkStore[result.index]
+        state.bytesReceived += rawChunk.byteLength
+        state.speedSamples.push({ bytes: state.bytesReceived, time: Date.now() })
+        if (state.speedSamples.length > 50) state.speedSamples.shift()
+
+        const stats = transfer.calculateProgress(
+            state.bytesReceived,
+            metadata.size,
+            state.startTime,
+            state.speedSamples
+        )
+        ui.updateQueueItemProgress(id, stats)
+        _updateGlobalMetrics()
+
+        if (state.chunksReceived === totalChunks) {
+            ui.updateQueueItemStatus(id, 'Done')
             const blob = await transfer.reassembleChunks(chunkStore, totalChunks, metadata.mimeType)
             transfer.triggerDownloadFromBlob(blob, metadata.name)
         }
@@ -293,20 +397,20 @@ async function handleBinaryChunk(data) {
 function setupDragAndDrop() {
     const dropZone = document.getElementById('drop-zone')
     const fileInput = document.getElementById('file-input')
-    const btnSelect = document.getElementById('btn-select-file')
 
-    btnSelect.addEventListener('click', () => fileInput.click())
+    // Handle button clicks in case previous listeners detached
+    // HTML has onclick="document.getElementById('file-input').click()"
 
     fileInput.addEventListener('change', (e) => {
-        if (e.target.files.length) handleFileSelection(e.target.files[0])
+        if (e.target.files.length) {
+            for (let file of e.target.files) {
+                handleFileSelection(file)
+            }
+        }
     })
 
-    document.body.addEventListener('dragover', e => {
-        e.preventDefault()
-    })
-    document.body.addEventListener('drop', e => {
-        e.preventDefault()
-    })
+    document.body.addEventListener('dragover', e => e.preventDefault())
+    document.body.addEventListener('drop', e => e.preventDefault())
 
     dropZone.addEventListener('dragenter', () => dropZone.classList.add('drag-active'))
     dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-active'))
@@ -315,32 +419,180 @@ function setupDragAndDrop() {
         e.preventDefault()
         dropZone.classList.remove('drag-active')
         if (e.dataTransfer.files.length) {
-            handleFileSelection(e.dataTransfer.files[0])
+            for (let file of e.dataTransfer.files) {
+                handleFileSelection(file)
+            }
         }
     })
 }
 
-function handleFileSelection(file) {
-    if (!peerConn || peerConn._pc.iceConnectionState !== 'connected') {
+async function handleFileSelection(file) {
+    if (!peerConn || (peerConn._pc.iceConnectionState !== 'connected' && peerConn._pc.iceConnectionState !== 'completed')) {
         ui.showModal('Warning', 'Wait for the peer to connect before selecting a file.')
         return
     }
 
-    currentFile = file
-    ui.showFileInfo({ name: file.name, size: file.size, mimeType: file.type })
-    ui.toggleHidden('drop-zone', true)
+    const id = uuidv4()
+    let sessionSalt = null
+    let sessionKey = null
 
-    // Propose transfer to receiver
-    peerConn.dataChannel.send(JSON.stringify({
+    if (roomPassword) {
+        sessionSalt = generateSalt()
+        sessionKey = await deriveKey(roomPassword, sessionSalt)
+    }
+
+    activeTransfers.set(id, {
+        role: 'sending',
+        file,
+        sessionKey,
+        speedSamples: [],
+        startTime: 0
+    })
+
+    ui.addQueueItem(id, { name: file.name, size: file.size, mimeType: file.type }, 'sending')
+    _bindCancelButton(id)
+
+    peerConn.controlChannel.send(JSON.stringify({
         type: 'file-metadata',
+        id,
         name: file.name,
         size: file.size,
         mimeType: file.type,
-        salt: saltToBase64(sessionSalt)
+        salt: sessionSalt ? saltToBase64(sessionSalt) : null
     }))
+}
+
+function _bindCancelButton(id) {
+    const btn = document.getElementById(`btn-cancel-${id}`)
+    if (!btn) return
+    btn.addEventListener('click', () => {
+        const state = activeTransfers.get(id)
+        if (state) {
+            state.cancelled = true
+            activeTransfers.delete(id)
+        }
+        ui.updateQueueItemStatus(id, 'Cancelled')
+        peerConn?.controlChannel?.send(JSON.stringify({ type: 'transfer-cancelled', id }))
+    })
 }
 
 // Global actions
 document.getElementById('btn-leave')?.addEventListener('click', () => {
     window.location.href = '/'
 })
+
+document.getElementById('btn-retry')?.addEventListener('click', () => {
+    window.location.reload()
+})
+
+document.getElementById('btn-save-qr')?.addEventListener('click', () => {
+    ui.downloadQrPng()
+})
+
+document.getElementById('relay-only')?.addEventListener('change', (e) => {
+    if (e.target.checked && !_hasTurnServer()) {
+        e.target.checked = false
+        ui.showModal('TURN Required', 'Relay-only mode requires a TURN server, but none is configured.')
+        return
+    }
+    if (!peerConn) return
+    const pcState = peerConn._pc?.iceConnectionState
+    if (pcState === 'connected' || pcState === 'completed') {
+        e.target.checked = !e.target.checked
+        ui.showModal('Cannot Change', 'Relay mode cannot be changed during an active connection.')
+        return
+    }
+    peerConn.close()
+    peerConn = new PeerConnection(signaling, { role: isInitiator ? 'initiator' : 'responder', iceConfig: getEffectiveIceConfig() })
+    setupPeerConnection()
+})
+
+// ── Helper Functions ─────────────────────────────────────────────
+
+function _hasTurnServer() {
+    return iceConfig?.iceServers?.some(s => {
+        const urls = Array.isArray(s.urls) ? s.urls : [s.urls]
+        return urls.some(u => u.startsWith('turn:') || u.startsWith('turns:'))
+    }) ?? false
+}
+
+function getEffectiveIceConfig() {
+    const relayOnly = document.getElementById('relay-only')?.checked
+    if (!relayOnly || !iceConfig || !_hasTurnServer()) return iceConfig
+    return { ...iceConfig, iceTransportPolicy: 'relay' }
+}
+
+function _updateRelayToggleVisibility() {
+    const container = document.getElementById('relay-toggle-container')
+    if (container && !_hasTurnServer()) {
+        container.classList.add('hidden')
+    }
+}
+
+function startExpiryTimer() {
+    // Timer starts from client connect time, not server room creation time.
+    // A responder joining late may see a slightly optimistic countdown.
+    const startTime = Date.now()
+    expiryInterval = setInterval(() => {
+        const elapsed = Date.now() - startTime
+        const remaining = ROOM_EXPIRY_MS - elapsed
+        if (remaining <= 0) {
+            clearInterval(expiryInterval)
+            ui.showExpiryNotice(0)
+            return
+        }
+        if (remaining <= EXPIRY_WARN_AT_MS) {
+            ui.showExpiryNotice(Math.ceil(remaining / 1000))
+        }
+    }, 1000)
+}
+
+function _handleRoomExpiry() {
+    roomExpired = true
+    if (expiryInterval) clearInterval(expiryInterval)
+    ui.showExpiryNotice(0)
+    const pcState = peerConn?._pc?.iceConnectionState
+    if (pcState === 'connected' || pcState === 'completed') {
+        ui.showModal('Room Expired', 'The signaling room has expired. Active P2P transfers will continue, but new connections are not possible.')
+    } else {
+        ui.setStatus('failed')
+        ui.showModal('Room Expired', 'The room has expired. Please create a new room.', false).then(() => {
+            window.location.href = '/'
+        })
+    }
+}
+
+// ── Global Stats Tracking ────────────────────────────────────────
+
+function _updateGlobalMetrics() {
+    let totalSent = 0
+    let totalReceived = 0
+    let uploadSpeed = 0
+    let downloadSpeed = 0
+
+    const now = Date.now()
+    const windowMs = 1000
+
+    for (const [, state] of activeTransfers.entries()) {
+        if (state.role === 'sending') {
+            totalSent += (state.bytesSent || 0)
+            const recentSamples = state.speedSamples.filter(s => now - s.time < windowMs)
+            if (recentSamples.length > 1) {
+                uploadSpeed += Math.max(0, recentSamples[recentSamples.length - 1].bytes - recentSamples[0].bytes)
+            }
+        } else {
+            totalReceived += (state.bytesReceived || 0)
+            const recentSamples = state.speedSamples.filter(s => now - s.time < windowMs)
+            if (recentSamples.length > 1) {
+                downloadSpeed += Math.max(0, recentSamples[recentSamples.length - 1].bytes - recentSamples[0].bytes)
+            }
+        }
+    }
+
+    ui.updateGlobalStats({
+        totalSent,
+        totalReceived,
+        uploadSpeed,
+        downloadSpeed
+    })
+}

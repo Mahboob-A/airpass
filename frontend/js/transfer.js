@@ -108,7 +108,7 @@ export async function sendFile(channel, file, { onProgress, encryptChunk, onCanc
  * @param {Function} [options.decryptChunk] - Optional: (ArrayBuffer, index) => Promise<ArrayBuffer>
  * @returns {Promise<{ index: number, received: number, isComplete: boolean }>}
  */
-export async function receiveChunk(data, chunkStore, { totalChunks, decryptChunk }) {
+export async function receiveChunk(data, chunkStore, { decryptChunk }) {
     const { index, payload } = extractChunkIndex(data)
 
     let chunk = payload
@@ -118,12 +118,7 @@ export async function receiveChunk(data, chunkStore, { totalChunks, decryptChunk
 
     chunkStore[index] = chunk
 
-    const received = chunkStore.filter(Boolean).length
-    return {
-        index,
-        received,
-        isComplete: received === totalChunks,
-    }
+    return { index }
 }
 
 /**
@@ -142,8 +137,10 @@ export function calculateProgress(bytesTransferred, totalBytes, startTime, speed
     const now = Date.now()
     const windowMs = 1000
     const recentSamples = speedSamples.filter(s => now - s.time < windowMs)
-    const windowBytes = recentSamples.reduce((sum, s) => sum + s.bytes, 0)
-    const speedBps = windowBytes  // bytes per second (window is 1s)
+    let speedBps = 0
+    if (recentSamples.length > 1) {
+        speedBps = recentSamples[recentSamples.length - 1].bytes - recentSamples[0].bytes
+    }
 
     // ETA calculation
     const remaining = totalBytes - bytesTransferred
@@ -265,4 +262,36 @@ export function triggerDownloadFromBlob(blob, filename) {
     a.click()
     document.body.removeChild(a)
     setTimeout(() => URL.revokeObjectURL(url), 10000)
+}
+
+/**
+ * Determine the optimal download strategy for the receiver.
+ * Strategies cascade from most efficient (streams) to least efficient (memory array).
+ * 
+ * @param {string} filename 
+ * @param {number} totalBytes 
+ * @returns {Promise<{ type: string, writer: object|null, showWarning: boolean, warningMessage: string }>}
+ */
+export async function selectDownloadStrategy(filename, totalBytes) {
+    // 1. Try Service Worker Streaming (StreamSaver.js)
+    const swStream = createServiceWorkerStream(filename, totalBytes)
+    if (swStream) return { type: 'streamsaver', writer: swStream, showWarning: false }
+
+    // 2. Try File System Access API
+    const fsStream = await openSaveFilePicker(filename)
+    if (fsStream) return { type: 'fs-api', writer: fsStream, showWarning: false }
+
+    // 3. Last Resort: Memory Blob
+    // If the file is huge and we fall back to RAM, we must warn the user
+    // A safe limit for Chrome is ~500MB, iOS Safari is tight (~100MB-200MB)
+    const mbLimit = 250 * 1024 * 1024; // 250 MB
+
+    return {
+        type: 'blob',
+        writer: null,
+        showWarning: totalBytes > mbLimit,
+        warningMessage: `Your browser limits direct file saving. ` +
+            `This ${Math.round(totalBytes / 1024 / 1024)}MB file will be cached in RAM before downloading, which may crash the page. ` +
+            `Ensure you have enough free memory.\n\nProceed?`
+    }
 }

@@ -77,7 +77,7 @@ if settings.is_development:
 # HTTP endpoints
 # ─────────────────────────────────────────────────────────────
 
-@app.get("/")
+@app.get("/api/health")
 async def health_check():
     """Health check endpoint. Returns 200 OK if server is running."""
     return {"status": "ok"}

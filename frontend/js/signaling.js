@@ -130,10 +130,10 @@ export class SignalingClient {
  * Create a signaling client connected to the backend.
  *
  * @param {string} roomId - The room UUID (for /ws/{roomId} endpoint)
+ * @param {string} wsOrigin - WebSocket origin (e.g. 'ws://localhost:8000')
  * @returns {SignalingClient}
  */
-export function createSignalingClient(roomId) {
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${protocol}//${location.host}/ws/${roomId}`
+export function createSignalingClient(roomId, wsOrigin) {
+    const url = `${wsOrigin}/ws/${roomId}`
     return new SignalingClient(url)
 }

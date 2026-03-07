@@ -35,31 +35,98 @@ export function setStatus(state) {
     if (state !== 'waiting' && state !== 'connecting') {
         el.classList.remove('hidden')
     }
-}
 
-// ── Progress ─────────────────────────────────────────────────
+    const retryContainer = document.getElementById('retry-container')
+    if (retryContainer) {
+        retryContainer.classList.toggle('hidden', state !== 'failed')
+    }
+}
+// ── Transfer Queues ────────────────────────────────────────────
 
 /**
- * Update the transfer progress display.
- * @param {{ percent: number, humanSpeed: string, humanEta: string, bytesTransferred: number, totalBytes: number }} progress
+ * Add a new file item to either the Sending or Receiving queue.
+ * @param {string} id - Unique transfer ID
+ * @param {object} metadata - File metadata (name, size, type)
+ * @param {'sending'|'receiving'} role 
  */
-export function updateProgress(progress) {
-    const bar = document.getElementById('progress-bar')
-    const pct = document.getElementById('progress-percent')
-    const speed = document.getElementById('transfer-speed')
-    const eta = document.getElementById('transfer-eta')
-    const bytes = document.getElementById('bytes-transferred')
+export function addQueueItem(id, metadata, role = 'sending') {
+    const listId = role === 'sending' ? 'sending-list' : 'receiving-list'
+    const list = document.getElementById(listId)
+    if (!list) return
 
-    if (bar) bar.style.width = `${progress.percent}%`
-    if (pct) pct.textContent = `${progress.percent.toFixed(1)}%`
-    if (speed) speed.textContent = progress.humanSpeed
-    if (eta) eta.textContent = progress.humanEta
-    if (bytes) bytes.textContent = `${formatBytes(progress.bytesTransferred)} of ${formatBytes(progress.totalBytes)}`
+    const iconClass = role === 'sending' ? 'sending' : 'receiving'
+    const iconChar = role === 'sending' ? '↑' : '↓'
+
+    // For receivers, show a download button initially. Senders start 'Awaiting'.
+    const actionHtml = role === 'receiving'
+        ? `<div class="queue-item-actions" id="actions-${id}">
+         <button id="btn-accept-${id}" class="btn primary">Download</button>
+         <button id="btn-cancel-${id}" class="btn danger" style="flex:1">Cancel</button>
+       </div>`
+        : `<div class="queue-item-actions" id="actions-${id}">
+         <button id="btn-cancel-${id}" class="btn danger" style="flex:1">Cancel</button>
+       </div>`
+
+    const html = `
+    <div class="queue-item" id="queue-item-${id}">
+        <div class="queue-item-header">
+            <div class="queue-item-icon ${iconClass}">${iconChar}</div>
+            <div class="queue-item-details">
+                <div class="queue-item-name" title="${metadata.name}">${metadata.name}</div>
+                <div class="queue-item-meta">
+                    <span>${formatBytes(metadata.size)}</span>
+                    <span class="queue-item-status-text" id="status-text-${id}">Awaiting</span>
+                </div>
+                <div class="queue-item-progress-wrap">
+                    <div class="queue-item-progress-bar">
+                        <div class="queue-item-progress-fill" id="progress-fill-${id}" style="width: 0%"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        ${actionHtml}
+    </div>
+`
+    list.insertAdjacentHTML('beforeend', html)
 }
 
-export function showProgressContainer(show) {
-    const el = document.getElementById('progress-container')
-    if (el) el.classList.toggle('hidden', !show)
+/**
+ * Update the transfer progress display for a specific queue item.
+ * @param {string} id 
+ * @param {object} progress 
+ */
+export function updateQueueItemProgress(id, progress) {
+    const fill = document.getElementById(`progress-fill-${id}`)
+    const statusText = document.getElementById(`status-text-${id}`)
+
+    if (fill) fill.style.width = `${progress.percent}%`
+    if (statusText && progress.percent < 100) {
+        statusText.textContent = `${progress.percent.toFixed(0)}% • ${progress.humanSpeed}`
+    }
+}
+
+/**
+ * Update the text status of a queue item.
+ * @param {string} id 
+ * @param {string} status 
+ */
+export function updateQueueItemStatus(id, status) {
+    const statusText = document.getElementById(`status-text-${id}`)
+    if (!statusText) return
+
+    statusText.textContent = status
+    const lower = status.toLowerCase()
+    if (lower === 'done') {
+        statusText.className = 'queue-item-status-text done'
+        const fill = document.getElementById(`progress-fill-${id}`)
+        if (fill) fill.style.width = '100%'
+        const actions = document.getElementById(`actions-${id}`)
+        if (actions) actions.classList.add('hidden')
+    } else if (lower.includes('reject') || lower.includes('fail') || lower.includes('cancel') || lower.includes('error')) {
+        statusText.className = 'queue-item-status-text failed'
+        const actions = document.getElementById(`actions-${id}`)
+        if (actions) actions.classList.add('hidden')
+    }
 }
 
 // ── Room Info ────────────────────────────────────────────────
@@ -71,6 +138,15 @@ export function showProgressContainer(show) {
 export function showRoomCode(code) {
     const el = document.getElementById('room-code')
     if (el) el.textContent = code
+}
+
+/**
+ * Set the descriptive text under the room code.
+ * @param {string} text 
+ */
+export function setRoomHelpText(text) {
+    const el = document.getElementById('room-help-text')
+    if (el) el.textContent = text
 }
 
 /**
@@ -109,51 +185,43 @@ export function showQrCode(url) {
     }
 }
 
-// ── File Info ────────────────────────────────────────────────
-
 /**
- * Display the incoming file metadata card (receiver side).
- * @param {{ name: string, size: number, mimeType: string }} meta
+ * Download the QR code as a PNG image file.
+ * Extracts the canvas rendered by qrcode.js and triggers a download.
  */
-export function showFileInfo(meta) {
-    const card = document.getElementById('file-info-card')
-    if (!card) return
-    card.classList.remove('hidden')
-    document.getElementById('file-name').textContent = meta.name
-    document.getElementById('file-size').textContent = formatBytes(meta.size)
-    document.getElementById('file-type').textContent = meta.mimeType || 'application/octet-stream'
+export function downloadQrPng() {
+    const container = document.getElementById('qr-container')
+    if (!container) return
+    const canvas = container.querySelector('canvas')
+    if (!canvas) return
+    const dataUrl = canvas.toDataURL('image/png')
+    const a = document.createElement('a')
+    a.href = dataUrl
+    a.download = 'airpass-qr.png'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
 }
 
+// ── File Acceptance ──────────────────────────────────────────
+
 /**
- * Wait for the user to accept or reject the file.
- * Returns true if accepted, false if rejected.
+ * Wait for the user to click the download button on a queue item.
+ * Auto-hides the button once clicked.
+ * @param {string} id 
  * @returns {Promise<boolean>}
  */
-export function waitForFileAcceptance() {
+export function waitForQueueItemAcceptance(id) {
     return new Promise((resolve) => {
-        const actions = document.getElementById('file-actions')
-        const btnAccept = document.getElementById('btn-accept')
-        const btnReject = document.getElementById('btn-reject')
+        const btn = document.getElementById(`btn-accept-${id}`)
+        const actions = document.getElementById(`actions-${id}`)
 
-        if (!actions || !btnAccept || !btnReject) {
-            // If UI is missing, auto-reject for safety
-            resolve(false)
-            return
+        if (!btn) return resolve(false)
+
+        btn.onclick = () => {
+            if (actions) actions.classList.add('hidden')
+            resolve(true)
         }
-
-        actions.classList.remove('hidden')
-
-        const cleanup = () => {
-            actions.classList.add('hidden')
-            btnAccept.removeEventListener('click', onAccept)
-            btnReject.removeEventListener('click', onReject)
-        }
-
-        const onAccept = () => { cleanup(); resolve(true) }
-        const onReject = () => { cleanup(); resolve(false) }
-
-        btnAccept.addEventListener('click', onAccept)
-        btnReject.addEventListener('click', onReject)
     })
 }
 
@@ -233,6 +301,35 @@ export function showBrowserWarning(message) {
     return showModal("Memory Warning", message, true)
 }
 
+/**
+ * Show or update the room expiry countdown notice.
+ * @param {number} remainingSeconds - Seconds remaining, or 0 if expired
+ */
+export function showExpiryNotice(remainingSeconds) {
+    const el = document.getElementById('expiry-notice')
+    const textEl = document.getElementById('expiry-text')
+    if (!el || !textEl) return
+
+    el.classList.remove('hidden')
+
+    if (remainingSeconds <= 0) {
+        textEl.textContent = 'Room expired -- active transfers continue'
+        el.classList.remove('expiry-urgent')
+        el.classList.add('expiry-expired')
+        return
+    }
+
+    const min = Math.floor(remainingSeconds / 60)
+    const sec = remainingSeconds % 60
+    textEl.textContent = `Room expires in ${min}:${sec.toString().padStart(2, '0')}`
+
+    if (remainingSeconds <= 300) {
+        el.classList.add('expiry-urgent')
+    } else {
+        el.classList.remove('expiry-urgent')
+    }
+}
+
 function formatBytes(bytes) {
     if (bytes === 0) return '0 Bytes'
     const k = 1024
@@ -244,4 +341,32 @@ function formatBytes(bytes) {
 export function toggleHidden(id, hide) {
     const el = document.getElementById(id)
     if (el) el.classList.toggle('hidden', hide)
+}
+
+/**
+ * Update the global transfer statistics.
+ * @param {object} stats - { totalSent, totalReceived, uploadSpeed, downloadSpeed }
+ */
+export function updateGlobalStats(stats) {
+    const container = document.getElementById('global-stats')
+    if (container && container.classList.contains('hidden')) {
+        container.classList.remove('hidden')
+    }
+
+    const sentEl = document.getElementById('stat-total-sent')
+    const recEl = document.getElementById('stat-total-received')
+    const upEl = document.getElementById('stat-upload-speed')
+    const downEl = document.getElementById('stat-download-speed')
+
+    if (sentEl) sentEl.textContent = formatBytes(stats.totalSent)
+    if (recEl) recEl.textContent = formatBytes(stats.totalReceived)
+    if (upEl) upEl.textContent = formatSpeed(stats.uploadSpeed)
+    if (downEl) downEl.textContent = formatSpeed(stats.downloadSpeed)
+}
+
+function formatSpeed(bps) {
+    if (bps === 0) return '0 B/s'
+    const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s']
+    const i = Math.floor(Math.log(bps) / Math.log(1024))
+    return `${(bps / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`
 }

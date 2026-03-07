@@ -40,7 +40,7 @@ describe('PeerConnection - Initiator (Sender)', () => {
     beforeEach(async () => {
         mockSignaling = { send: vi.fn(), on: vi.fn() }
         const { PeerConnection } = await import('./peer.js')
-        peerConn = new PeerConnection(mockSignaling, { role: 'sender' })
+        peerConn = new PeerConnection(mockSignaling, { role: 'sender', iceConfig: { iceServers: [] } })
     })
 
     it('should create RTCPeerConnection with ICE config', () => {
@@ -48,8 +48,8 @@ describe('PeerConnection - Initiator (Sender)', () => {
         expect(MockRTCPeerConnection.instance.config).toHaveProperty('iceServers')
     })
 
-    it('should create a DataChannel named "file-transfer"', () => {
-        const ch = MockRTCPeerConnection.instance._channels['file-transfer']
+    it('should create a Control Channel named "p2p-control"', () => {
+        const ch = MockRTCPeerConnection.instance._channels['p2p-control']
         expect(ch).toBeDefined()
     })
 

@@ -10,6 +10,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"
         integrity="sha512-CNgIRecGo7nphbeZ04Sc13ka07paqdeTu0c7vvuHqjD/sP0bNl1/z11k+pY81S0G5Yv1w1oEDD9g/2gqYfWbQ"
         crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdn.jsdelivr.net/npm/streamsaver@2.0.6/StreamSaver.min.js"></script>
 </head>
 
 <body>
@@ -17,58 +18,92 @@
         <header>
             <h1>AirPass</h1>
             <div id="status" class="status status-waiting">Initializing...</div>
+            <div id="retry-container" class="retry-container hidden">
+                <button id="btn-retry" class="btn primary btn-retry">Retry Connection</button>
+            </div>
+            <div id="expiry-notice" class="expiry-notice hidden">
+                <span id="expiry-text"></span>
+            </div>
         </header>
 
         <section id="room-info" class="card hidden">
             <h2>Room Code</h2>
             <div class="room-code-display" id="room-code">------</div>
-            <p>Waiting for peer to join...</p>
-            <div id="qr-container" class="qr-box"></div>
+            <p id="room-help-text">Waiting for peer to join...</p>
+            <div id="qr-wrapper">
+                <div id="qr-container" class="qr-box"></div>
+                <button id="btn-save-qr" class="btn secondary btn-save-qr">Save QR as PNG</button>
+            </div>
             <a href="#" id="share-url" class="share-link">Share Link</a>
+            <div id="relay-toggle-container" class="relay-toggle-container">
+                <div class="relay-toggle">
+                    <label class="switch">
+                        <input type="checkbox" id="relay-only">
+                        <span class="slider round"></span>
+                    </label>
+                    <span>Relay only (hides your IP from peer)</span>
+                </div>
+                <p class="relay-help-text">Routes all traffic through TURN relay server. Slower, but hides your IP address.</p>
+            </div>
         </section>
 
+        <!-- Peer IP Disclosure Notice (F-34, SRS 3.2) -->
+        <div id="ip-notice" class="ip-notice hidden">
+            <span class="ip-notice-icon">i</span>
+            <span>Direct P2P connection -- the other party can see your IP address.</span>
+        </div>
+
+        <!-- File Selection Zone -->
         <section id="transfer-zone" class="card hidden">
-            <!-- File input hidden, triggered by button or drop -->
-            <input type="file" id="file-input" class="hidden">
-
             <div id="drop-zone" class="drop-zone">
-                <p>Drag & Drop a file here, or click to select</p>
-                <button id="btn-select-file" class="btn secondary">Select File</button>
-            </div>
-
-            <!-- Displayed when file is staged for sending or receiving -->
-            <div id="file-info-card" class="file-info hidden">
-                <h3 id="file-name">filename.ext</h3>
-                <p><span id="file-size">0 MB</span> • <span id="file-type">application/octet-stream</span></p>
-
-                <!-- Actions shown for receiver when metadata arrives -->
-                <div id="file-actions" class="file-actions hidden">
-                    <button id="btn-accept" class="btn primary">Accept & Download</button>
-                    <button id="btn-reject" class="btn danger">Reject</button>
-                </div>
-            </div>
-
-            <!-- Transfer Progress UI -->
-            <div id="progress-container" class="progress-section hidden">
-                <div class="progress-stats">
-                    <span id="progress-percent">0%</span>
-                    <span id="bytes-transferred">0 / 0</span>
-                </div>
-                <div class="progress-bar-bg">
-                    <div id="progress-bar" class="progress-bar-fill" style="width: 0%"></div>
-                </div>
-                <div class="progress-stats">
-                    <span id="transfer-speed">0 B/s</span>
-                    <span id="transfer-eta">—</span>
-                </div>
-            </div>
-
-            <!-- Overall room/transfer actions -->
-            <div class="room-actions mt-4">
-                <button id="btn-cancel" class="btn danger hidden">Cancel Transfer</button>
-                <button id="btn-leave" class="btn warning">Leave Room</button>
+                <p>Drag & Drop files here, or click to select</p>
+                <input type="file" id="file-input" class="hidden" multiple>
+                <button class="btn secondary" onclick="document.getElementById('file-input').click()"
+                    style="margin-top: 1rem; width: auto;">Select Files</button>
             </div>
         </section>
+
+        <!-- Global Transfer Stats -->
+        <div id="global-stats" class="card hidden" style="margin-top: 1rem; margin-bottom: 1rem;">
+            <div
+                style="display: flex; justify-content: space-between; align-items: center; font-size: 0.9em; flex-wrap: wrap; gap: 10px;">
+                <div><strong>Total Sent:</strong> <span id="stat-total-sent">0 B</span></div>
+                <div><strong>Total Received:</strong> <span id="stat-total-received">0 B</span></div>
+                <div><strong>Upload Speed:</strong> <span id="stat-upload-speed">0 B/s</span></div>
+                <div><strong>Download Speed:</strong> <span id="stat-download-speed">0 B/s</span></div>
+            </div>
+        </div>
+
+        <!-- Transfer Queues -->
+        <div id="queues-container" class="queues-container hidden">
+            <!-- Sending Queue -->
+            <section class="queue-section" id="sending-section">
+                <h3>Sending Queue</h3>
+                <div id="sending-list" class="queue-list"></div>
+            </section>
+
+            <!-- Receiving Queue -->
+            <section class="queue-section" id="receiving-section">
+                <div class="queue-header-row">
+                    <h3>Receiving Queue</h3>
+                    <div class="auto-download-toggle">
+                        <label for="auto-download">Auto Download?</label>
+                        <label class="switch">
+                            <input type="checkbox" id="auto-download">
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+                </div>
+                <div class="queue-help-text">
+                    <p id="auto-download-text">Auto-download is off. Use download buttons below each file.</p>
+                </div>
+                <div id="receiving-list" class="queue-list"></div>
+            </section>
+        </div>
+
+        <div class="room-actions mt-4" style="text-align: center; margin-bottom: 2rem;">
+            <button id="btn-leave" class="btn warning">Leave Room</button>
+        </div>
 
         <!-- Error & Warn modals container -->
         <div id="modal-container" class="modal-overlay hidden">
@@ -87,7 +122,7 @@
     </main>
 
     <!-- App entry point for the room page -->
-    <script type="module" src="/js/room.js"></script>
+    <script type="module" src="/js/room.js?v=3"></script>
 </body>
 
 </html>
