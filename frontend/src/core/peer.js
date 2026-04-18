@@ -135,6 +135,15 @@ export class PeerConnection {
     }
 
     /**
+     * Public accessor for the ICE connection state.
+     * BUG-06: exposes the internal state without leaking the private _pc reference.
+     * @returns {RTCIceConnectionState}
+     */
+    get iceConnectionState() {
+        return this._pc?.iceConnectionState ?? 'new'
+    }
+
+    /**
      * Create a new dedicated File Transfer channel. Both initiator & responder can do this.
      * @param {string} transferId 
      * @returns {RTCDataChannel}

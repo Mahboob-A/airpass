@@ -10,7 +10,7 @@ dev: ## Start backend + frontend dev servers (no Docker)
 	@trap 'kill 0' EXIT; \
 	echo "Starting backend on :8000 and frontend on :3000..."; \
 	(cd backend && uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload) & \
-	(cd frontend && python3 -m http.server 3000) & \
+	(cd frontend && npm run dev) & \
 	echo "Backend: http://localhost:8000"; \
 	echo "Frontend: http://localhost:3000"; \
 	wait
@@ -33,11 +33,11 @@ test-backend: ## Run backend pytest suite
 	cd backend && uv run pytest tests/ -v
 
 test-frontend: ## Run frontend vitest suite
-	cd frontend && npx vitest run
+	cd frontend && npm test
 
 certs: ## Generate self-signed SSL certificates for local dev
 	bash scripts/generate-dev-certs.sh
 
 clean: ## Remove generated files and caches
 	rm -rf backend/.pytest_cache backend/__pycache__ backend/tests/__pycache__
-	rm -rf frontend/node_modules/.cache
+	rm -rf frontend/node_modules/.cache frontend/dist

@@ -32,6 +32,7 @@ yarn-error.log*
 *.swp
 *.swo
 
+srm-university-docs/
 
 # --- Security ---
 ssl/certs/*.pem
