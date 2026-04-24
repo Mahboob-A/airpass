@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Card } from './ui';
 import { UploadCloud } from 'lucide-react';
 import { cn } from '../lib/utils';

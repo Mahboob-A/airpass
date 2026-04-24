@@ -1,16 +1,17 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { useRoomStore, useTransferStore } from '../store';
 import { WS_ORIGIN } from '../core/config';
 import { SignalingClient } from '../core/signaling';
 import { PeerConnection, fetchIceConfig } from '../core/peer';
 import { useTransferLogic } from '../hooks/useTransferLogic';
-import { Card, Button } from '../components/ui';
+import { Card, Button, ConfirmModal, PromptModal } from '../components/ui';
 import { FileDropZone } from '../components/FileDropZone';
 import { TransferDashboard } from '../components/TransferDashboard';
 import { Loader2, Copy, QrCode, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { cn } from '../lib/utils';
+import { formatBytes } from '../lib/format';
 
 export function RoomPage() {
     const { code } = useParams();
@@ -21,11 +22,64 @@ export function RoomPage() {
 
     // BUG-05: password comes from the Zustand store — NOT from the URL
     const { status, setStatus, setRoomInfo, setSignaling, setPeerConn, reset: resetRoom, joinCode, shareUrl, password } = useRoomStore();
-    const { attachPeerHandlers, handleFileSelection, cancelTransfer } = useTransferLogic();
+    const { attachPeerHandlers, handleFileSelection, cancelTransfer, acceptTransfer, rejectTransfer } = useTransferLogic();
 
     const [showQr, setShowQr] = useState(false);
+    const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
+    const [showErrorModal, setShowErrorModal] = useState(false);
+    const [errorMessage, setErrorMessage] = useState('');
+    const [showPeerLeftModal, setShowPeerLeftModal] = useState(false);
+    // FIX-A: file-offer modal state — replaces window.confirm for incoming file offers
+    const [pendingOffer, setPendingOffer] = useState(null); // { id, name, size } | null
+
+    // Track previous code to detect room creation navigation
+    const prevCodeRef = useRef(code);
+    // Signals to the cleanup that room was just created - skip full reset
+    const roomCreatedRef = useRef(false);
+
+    // FIX-A: stable callback passed to attachPeerHandlers so the DataChannel handler
+    // can open the React file-offer modal without using window.confirm
+    const onFileOffer = useCallback((id, name, size) => {
+        setPendingOffer({ id, name, size });
+    }, []);
+
+    // Handler for password prompt modal
+    const handlePasswordSubmit = (pwd) => {
+        if (!pwd) {
+            navigate('/');
+            return;
+        }
+        currentPassword = pwd;
+        if (signalingClient) {
+            signalingClient.send({ type: 'verify-password', password: pwd });
+        }
+        setShowPasswordPrompt(false);
+    };
+
+    // Handler for error modal
+    const handleErrorClose = () => {
+        setShowErrorModal(false);
+        navigate('/');
+    };
+
+    // Handler for peer left modal
+    const handlePeerLeftClose = () => {
+        setShowPeerLeftModal(false);
+        navigate('/');
+    };
 
     useEffect(() => {
+        // Detect navigation from /room/new to /room/{code} after room creation.
+        // In this case the signaling socket and PeerConnection are already live -
+        // do not re-initialise.
+        const isRoomCreatedNavigation = prevCodeRef.current === 'new' && code !== 'new';
+        prevCodeRef.current = code;
+
+        if (isRoomCreatedNavigation) return;
+
+        // Reset the flag whenever we start a fresh init cycle.
+        roomCreatedRef.current = false;
+
         let signalingClient;
         let pc;
         let isInitiator = action === 'create';
@@ -40,7 +94,10 @@ export function RoomPage() {
                 iceConfig = await fetchIceConfig();
                 if (isCancelled) return; // Prevent orphan socket creation after unmount
 
-                const wsUrl = `${WS_ORIGIN}/ws/p2p`;
+                // Use the backend WebSocket path. Room is created/joined server-side.
+                // FIX: Use /ws/new as the connection path - backend will create or join
+                // the room based on the message type (create-room or join-room).
+                const wsUrl = `${WS_ORIGIN}/ws/new`;
                 signalingClient = new SignalingClient(wsUrl);
                 setSignaling(signalingClient);
 
@@ -59,12 +116,17 @@ export function RoomPage() {
                     setRoomInfo(msg.code, frontendShareUrl);
                     setStatus('waiting');
 
-                    // BUG-01 fix refined: update URL using history API to prevent React Router from unmounting and remounting the component
-                    window.history.replaceState(null, '', `/room/${msg.code}`);
+                    // Mark that we are about to navigate away from /room/new so the
+                    // cleanup for this effect instance skips resetRoom().
+                    roomCreatedRef.current = true;
+
+                    // BUG-01 fix: use React Router navigate instead of history API
+                    navigate(`/room/${msg.code}`, { replace: true });
 
                     pc = new PeerConnection(signalingClient, { role: 'initiator', iceConfig });
                     setPeerConn(pc);
-                    attachPeerHandlers(pc, currentPassword);
+                    // FIX-A: pass onFileOffer so incoming file offers open the React modal
+                    attachPeerHandlers(pc, currentPassword, onFileOffer);
                 });
 
                 signalingClient.on('room-joined', async (msg) => {
@@ -72,18 +134,13 @@ export function RoomPage() {
                     setRoomInfo(code, currentUrl);
 
                     if (msg.passwordRequired) {
-                        const pwd = prompt('This room is protected by a password. Please enter it:');
-                        if (!pwd) {
-                            navigate('/');
-                            return;
-                        }
-                        currentPassword = pwd;
-                        signalingClient.send({ type: 'verify-password', password: pwd });
+                        setShowPasswordPrompt(true);
                     } else {
                         setStatus('waiting');
                         pc = new PeerConnection(signalingClient, { role: 'responder', iceConfig });
                         setPeerConn(pc);
-                        attachPeerHandlers(pc, currentPassword);
+                        // FIX-A: pass onFileOffer so incoming file offers open the React modal
+                        attachPeerHandlers(pc, currentPassword, onFileOffer);
                     }
                 });
 
@@ -92,10 +149,11 @@ export function RoomPage() {
                         setStatus('waiting');
                         pc = new PeerConnection(signalingClient, { role: 'responder', iceConfig });
                         setPeerConn(pc);
-                        attachPeerHandlers(pc, currentPassword);
+                        // FIX-A: pass onFileOffer so incoming file offers open the React modal
+                        attachPeerHandlers(pc, currentPassword, onFileOffer);
                     } else {
-                        alert('Incorrect password.');
-                        navigate('/');
+                        setErrorMessage('Incorrect password.');
+                        setShowErrorModal(true);
                     }
                 });
 
@@ -110,8 +168,7 @@ export function RoomPage() {
 
                 signalingClient.on('peer-left', () => {
                     setStatus('failed');
-                    alert('The other peer left the room.');
-                    navigate('/');
+                    setShowPeerLeftModal(true);
                 });
 
                 signalingClient.on('error', (err) => {
@@ -135,6 +192,10 @@ export function RoomPage() {
         init();
 
         return () => {
+            // If room was just created and we are navigating to /room/{code}, skip the
+            // full reset - the socket and PeerConnection must remain alive.
+            if (roomCreatedRef.current) return;
+
             isCancelled = true;
             if (pc) pc.close();
             // BUG-02 fix: use the public close() API — private _ws is not accessible via .ws
@@ -233,6 +294,57 @@ export function RoomPage() {
                     <Button onClick={() => window.location.reload()}>Retry Connection</Button>
                 </Card>
             )}
+
+            {/* Modals */}
+            <PromptModal
+                isOpen={showPasswordPrompt}
+                onClose={() => navigate('/')}
+                onSubmit={handlePasswordSubmit}
+                title="Password Required"
+                message="This room is protected by a password. Please enter it to continue:"
+                placeholder="Enter room password"
+                submitText="Join Room"
+                cancelText="Cancel"
+            />
+
+            <ConfirmModal
+                isOpen={showErrorModal}
+                onClose={handleErrorClose}
+                onConfirm={handleErrorClose}
+                title="Error"
+                message={errorMessage}
+                confirmText="OK"
+                cancelText=""
+                variant="danger"
+            />
+
+            <ConfirmModal
+                isOpen={showPeerLeftModal}
+                onClose={handlePeerLeftClose}
+                onConfirm={handlePeerLeftClose}
+                title="Peer Disconnected"
+                message="The other peer has left the room."
+                confirmText="Return Home"
+            />
+
+            {/* FIX-A: File offer modal — replaces window.confirm for incoming transfers */}
+            <ConfirmModal
+                isOpen={pendingOffer !== null}
+                onClose={() => {
+                    rejectTransfer(pendingOffer?.id);
+                    setPendingOffer(null);
+                }}
+                onConfirm={() => {
+                    acceptTransfer(pendingOffer?.id);
+                    setPendingOffer(null);
+                }}
+                title="Incoming File"
+                message={pendingOffer
+                    ? `Accept "${pendingOffer.name}" (${formatBytes(pendingOffer.size)})?`
+                    : ''}
+                confirmText="Accept"
+                cancelText="Reject"
+            />
         </div>
     );
 }

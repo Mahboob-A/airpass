@@ -38,4 +38,4 @@ srm-university-docs/
 ssl/certs/*.pem
 *.key
 *.crt
-
+info.txt

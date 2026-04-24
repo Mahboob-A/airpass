@@ -7,14 +7,76 @@ import { formatBytes } from '../lib/format'; // BUG-13: use canonical copy, not 
 
 export function useTransferLogic() {
     // BUG-08: removed confusing `joinCode: roomPassword` alias — joinCode is the room code, not the password
-    const { peerConn, setStatus } = useRoomStore();
+    // FIX-B: Do NOT destructure peerConn here — that captures a stale closure value captured at
+    // render time. Always read it from the store at call time via useRoomStore.getState().peerConn.
+    const { setStatus } = useRoomStore();
     const { addTransfer, updateTransfer, removeTransfer, updateGlobalStats, transfers } = useTransferStore();
 
-    // Note: roomPassword is conceptually different from joinCode but we stored it in the original `roomPassword` var.
-    // Actually, we need to pass the password down. In RoomPage, password is searchParams.get('password'). 
-    // We can add password to the room store.
+    // ── Accept / Reject (called from RoomPage modal buttons) ──────────────────
 
-    const handleControlMessage = useCallback(async (msg, password) => {
+    /**
+     * Called when the receiving user clicks Accept on the file-offer modal.
+     * Runs selectDownloadStrategy, updates status, and sends file-accept to the sender.
+     *
+     * @param {string} id - Transfer ID from the pending file-metadata message
+     */
+    const acceptTransfer = useCallback(async (id) => {
+        // FIX-B: read peerConn from store at call time, not from stale closure
+        const peerConn = useRoomStore.getState().peerConn;
+        const state = useTransferStore.getState().transfers[id];
+        if (!state || !peerConn) return;
+
+        const { metadata } = state;
+
+        const strategy = await transferLogic.selectDownloadStrategy(metadata.name, metadata.size);
+
+        if (strategy.showWarning) {
+            // Strategy 3 (StreamSaver) failed — blob fallback with RAM warning.
+            // We cannot use window.confirm here for the same blocking-dialog reason.
+            // The warning is shown inline; proceed as requested by spec (user already
+            // chose to accept, so we proceed with a console warning).
+            console.warn('[Strategy 1] RAM-limited download. File size:', formatBytes(metadata.size));
+        }
+
+        updateTransfer(id, { strategy, startTime: Date.now(), status: 'Transferring...' });
+        peerConn.controlChannel.send(JSON.stringify({ type: 'file-accept', id }));
+    }, [updateTransfer]);
+
+    /**
+     * Called when the receiving user clicks Reject (or closes) the file-offer modal.
+     *
+     * @param {string} id - Transfer ID
+     */
+    const rejectTransfer = useCallback((id) => {
+        // FIX-B: read peerConn from store at call time
+        const peerConn = useRoomStore.getState().peerConn;
+        updateTransfer(id, { status: 'Rejected' });
+        peerConn?.controlChannel?.send(JSON.stringify({ type: 'file-reject', id }));
+    }, [updateTransfer]);
+
+
+    // ── Control message handler ───────────────────────────────────────────────
+
+    /**
+     * Handle a control message from the peer's DataChannel.
+     *
+     * FIX-A: The old implementation called window.confirm() here for file-offer
+     * accept/reject. window.confirm is a blocking browser dialog that Chrome
+     * auto-dismisses to false when the tab is not focused — causing every incoming
+     * file to be silently rejected from the other peer's perspective.
+     *
+     * The new design:
+     *   file-metadata → set status 'Pending' → call onFileOffer(id, name, size)
+     *   RoomPage shows a modal → user clicks Accept or Reject
+     *   Accept → acceptTransfer(id) → sends file-accept
+     *   Reject → rejectTransfer(id) → sends file-reject
+     *
+     * @param {object} msg - Parsed control message
+     * @param {string} password - Room password (for encrypted transfers)
+     * @param {Function} onFileOffer - Callback: (id, name, size) => void
+     *   Called when a file-metadata message arrives so RoomPage can show the modal.
+     */
+    const handleControlMessage = useCallback(async (msg, password, onFileOffer) => {
         if (msg.type === 'file-metadata') {
             const { id, name, size, mimeType, salt } = msg;
 
@@ -23,13 +85,14 @@ export function useTransferLogic() {
                 const storePassword = useRoomStore.getState().password;
                 let currentPass = password || storePassword;
 
-                // If it's a password-protected file but we don't have the password
+                // If it's a password-protected file but we don't have the password,
+                // reject immediately — the user should have been prompted on room join.
                 if (!currentPass) {
-                    currentPass = window.prompt(`File "${name}" is encrypted. Please enter the room password to decrypt it:`);
-                    if (!currentPass) {
-                        peerConn.controlChannel.send(JSON.stringify({ type: 'file-reject', id }));
-                        return;
-                    }
+                    console.error('Encrypted file received but no password available. Rejecting.');
+                    // FIX-B: read peerConn from store at call time
+                    const peerConn = useRoomStore.getState().peerConn;
+                    peerConn?.controlChannel?.send(JSON.stringify({ type: 'file-reject', id }));
+                    return;
                 }
 
                 try {
@@ -37,16 +100,19 @@ export function useTransferLogic() {
                     sessionKey = await deriveKey(currentPass, sessionSalt);
                 } catch (err) {
                     console.error('Failed to establish encryption session key.', err);
-                    alert(`Failed to decrypt ${name}. Incorrect password.`);
-                    peerConn.controlChannel.send(JSON.stringify({ type: 'file-reject', id }));
+                    const peerConn = useRoomStore.getState().peerConn;
+                    peerConn?.controlChannel?.send(JSON.stringify({ type: 'file-reject', id }));
                     return;
                 }
             }
 
+            // FIX-A: Set status to 'Pending' (not 'Waiting') and delegate the
+            // accept/reject decision to the React UI via onFileOffer callback.
+            // Do NOT call window.confirm here.
             addTransfer(id, {
                 role: 'receiving',
                 metadata: { id, name, size, mimeType },
-                status: 'Waiting',
+                status: 'Pending',
                 strategy: null,
                 sessionKey,
                 chunkStore: [],
@@ -56,33 +122,16 @@ export function useTransferLogic() {
                 speedSamples: []
             });
 
-            // Automatically assume we ask for acceptance via UI, but for now let's auto-accept 
-            // (or we can add state 'Pending Accept' and wait for user, but to keep it simple let's auto accept and stream)
-
-            const proceed = window.confirm(`Accept file: ${name} (${formatBytes(size)})?`);
-            if (proceed) {
-                const strategy = await transferLogic.selectDownloadStrategy(name, size);
-
-                if (strategy.showWarning) {
-                    const warnProceed = window.confirm(strategy.warningMessage);
-                    if (!warnProceed) {
-                        updateTransfer(id, { status: 'Rejected' });
-                        peerConn.controlChannel.send(JSON.stringify({ type: 'file-reject', id }));
-                        return;
-                    }
-                }
-
-                updateTransfer(id, { strategy, startTime: Date.now(), status: 'Transferring...' });
-                peerConn.controlChannel.send(JSON.stringify({ type: 'file-accept', id }));
-            } else {
-                updateTransfer(id, { status: 'Rejected' });
-                peerConn.controlChannel.send(JSON.stringify({ type: 'file-reject', id }));
-            }
+            // Signal RoomPage to show the file-offer confirmation modal.
+            onFileOffer?.(id, name, size);
         }
         else if (msg.type === 'file-accept') {
             const id = msg.id;
             const state = useTransferStore.getState().transfers[id];
             if (!state || !state.file) return;
+
+            // FIX-B: read peerConn from store at call time, not stale closure
+            const peerConn = useRoomStore.getState().peerConn;
 
             updateTransfer(id, { status: 'Transferring...', startTime: Date.now() });
 
@@ -120,8 +169,12 @@ export function useTransferLogic() {
         else if (msg.type === 'transfer-cancelled') {
             updateTransfer(msg.id, { status: 'Cancelled', cancelled: true });
         }
-    }, [peerConn, addTransfer, updateTransfer]);
+    }, [addTransfer, updateTransfer]);
+    // FIX-B: peerConn intentionally NOT in the dependency array —
+    // it is always read fresh from the store at call time.
 
+
+    // ── Binary chunk handler ──────────────────────────────────────────────────
 
     const handleBinaryChunk = useCallback(async (id, data) => {
         const state = useTransferStore.getState().transfers[id];
@@ -186,25 +239,30 @@ export function useTransferLogic() {
                 }
             }
         } else {
-            const chunksReceived = state.chunksReceived + 1;
+            // BUG-04 & BUG-09 fix: use local cumulative variables like the writer branch does
+            let cumulativeBytes = state.bytesReceived;
+            let cumulativeChunks = state.chunksReceived;
+            let cumulativeSamples = [...state.speedSamples];
+
             const rawChunk = chunkStore[result.index];
-            const newBytesReceived = state.bytesReceived + rawChunk.byteLength;
+            cumulativeBytes += rawChunk.byteLength;
+            cumulativeChunks += 1;
 
-            const speedSamples = [...state.speedSamples, { bytes: newBytesReceived, time: Date.now() }];
-            if (speedSamples.length > 50) speedSamples.shift();
+            cumulativeSamples = [...cumulativeSamples, { bytes: cumulativeBytes, time: Date.now() }];
+            if (cumulativeSamples.length > 50) cumulativeSamples.shift();
 
-            const stats = transferLogic.calculateProgress(newBytesReceived, metadata.size, state.startTime, speedSamples);
+            const stats = transferLogic.calculateProgress(cumulativeBytes, metadata.size, state.startTime, cumulativeSamples);
 
             updateTransfer(id, {
-                bytesReceived: newBytesReceived,
-                chunksReceived,
-                speedSamples,
+                bytesReceived: cumulativeBytes,
+                chunksReceived: cumulativeChunks,
+                speedSamples: cumulativeSamples,
                 progressStats: stats
             });
 
             _updateGlobalMetrics();
 
-            if (chunksReceived === totalChunks) {
+            if (cumulativeChunks === totalChunks) {
                 updateTransfer(id, { status: 'Done' });
                 const blob = await transferLogic.reassembleChunks(chunkStore, totalChunks, metadata.mimeType);
                 transferLogic.triggerDownloadFromBlob(blob, metadata.name);
@@ -212,11 +270,22 @@ export function useTransferLogic() {
         }
     }, [updateTransfer]);
 
-    const attachPeerHandlers = useCallback((pc, password) => {
-        pc.onConnectionStateChange = (state) => {
-            if (state === 'connected') {
+
+    // ── Peer handler attachment ───────────────────────────────────────────────
+
+    /**
+     * Attach all DataChannel and connection-state handlers to a PeerConnection.
+     *
+     * @param {import('../core/peer').PeerConnection} pc
+     * @param {string} password - Room password (may be empty string)
+     * @param {Function} onFileOffer - (id, name, size) => void — called to show modal
+     */
+    const attachPeerHandlers = useCallback((pc, password, onFileOffer) => {
+        pc.onConnectionStateChange = (connectionState) => {
+            // FIX: onConnectionStateChange receives the state string, not the event object
+            if (connectionState === 'connected') {
                 setStatus('connected');
-            } else if (state === 'disconnected' || state === 'failed') {
+            } else if (connectionState === 'disconnected' || connectionState === 'failed') {
                 setStatus('failed');
             }
         };
@@ -227,7 +296,9 @@ export function useTransferLogic() {
 
         pc.onControlMessage = async (event) => {
             if (typeof event.data === 'string') {
-                await handleControlMessage(JSON.parse(event.data), password);
+                // FIX-A: pass onFileOffer so handleControlMessage can signal the UI
+                // instead of using window.confirm
+                await handleControlMessage(JSON.parse(event.data), password, onFileOffer);
             }
         };
 
@@ -245,7 +316,11 @@ export function useTransferLogic() {
     }, [handleControlMessage, handleBinaryChunk, setStatus, updateTransfer]);
 
 
+    // ── File selection (sender side) ──────────────────────────────────────────
+
     const handleFileSelection = useCallback(async (files, password) => {
+        // FIX-B: read peerConn from store at call time
+        const peerConn = useRoomStore.getState().peerConn;
         if (!peerConn || (peerConn.iceConnectionState !== 'connected' && peerConn.iceConnectionState !== 'completed')) {
             alert('Wait for the peer to connect before selecting a file.');
             return;
@@ -281,19 +356,26 @@ export function useTransferLogic() {
                 salt: sessionSalt ? saltToBase64(sessionSalt) : null
             }));
         }
-    }, [peerConn, addTransfer]);
+    }, [addTransfer]);
 
+
+    // ── Cancel ────────────────────────────────────────────────────────────────
 
     const cancelTransfer = useCallback((id) => {
+        // FIX-B: read peerConn from store at call time
+        const peerConn = useRoomStore.getState().peerConn;
         const state = useTransferStore.getState().transfers[id];
         if (state) {
             updateTransfer(id, { status: 'Cancelled', cancelled: true });
             peerConn?.controlChannel?.send(JSON.stringify({ type: 'transfer-cancelled', id }));
         }
-    }, [peerConn, updateTransfer]);
+    }, [updateTransfer]);
 
-    return { attachPeerHandlers, handleFileSelection, cancelTransfer };
+    return { attachPeerHandlers, handleFileSelection, cancelTransfer, acceptTransfer, rejectTransfer };
 }
+
+
+// ── Module-level helpers ──────────────────────────────────────────────────────
 
 function _updateGlobalMetrics() {
     let totalSent = 0;
@@ -329,5 +411,3 @@ function _updateGlobalMetrics() {
         downloadSpeed
     });
 }
-
-

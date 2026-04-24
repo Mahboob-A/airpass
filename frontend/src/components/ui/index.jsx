@@ -1,4 +1,4 @@
-import { forwardRef } from 'react';
+import React, { forwardRef } from 'react';
 import { cn } from '../../lib/utils';
 
 export const Button = forwardRef(({ className, variant = 'primary', size = 'default', ...props }, ref) => {
@@ -58,3 +58,86 @@ export const Card = forwardRef(({ className, ...props }, ref) => {
     );
 });
 Card.displayName = 'Card';
+
+export function Modal({ isOpen, onClose, title, children, footer }) {
+    if (!isOpen) return null;
+    
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div 
+                className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                onClick={onClose}
+            />
+            <div className="relative z-10 w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-xl p-6 shadow-2xl">
+                {title && (
+                    <h2 className="text-lg font-bold text-zinc-100 mb-4">{title}</h2>
+                )}
+                <div className="text-zinc-300 mb-6">{children}</div>
+                {footer && (
+                    <div className="flex justify-end gap-3">{footer}</div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+export function ConfirmModal({ isOpen, onClose, onConfirm, title, message, confirmText = 'Confirm', cancelText = 'Cancel', variant = 'primary' }) {
+    return (
+        <Modal
+            isOpen={isOpen}
+            onClose={onClose}
+            title={title}
+            footer={
+                <>
+                    <Button variant="secondary" onClick={onClose}>{cancelText}</Button>
+                    <Button variant={variant} onClick={onConfirm}>{confirmText}</Button>
+                </>
+            }
+        >
+            {message}
+        </Modal>
+    );
+}
+
+export function PromptModal({ isOpen, onClose, onSubmit, title, message, placeholder, submitText = 'Submit', cancelText = 'Cancel' }) {
+    const [value, setValue] = React.useState('');
+    
+    const handleSubmit = () => {
+        onSubmit(value);
+        setValue('');
+    };
+    
+    const handleClose = () => {
+        setValue('');
+        onClose();
+    };
+    
+    if (!isOpen) return null;
+    
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div 
+                className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                onClick={handleClose}
+            />
+            <div className="relative z-10 w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-xl p-6 shadow-2xl">
+                {title && (
+                    <h2 className="text-lg font-bold text-zinc-100 mb-4">{title}</h2>
+                )}
+                <p className="text-zinc-300 mb-4">{message}</p>
+                <Input
+                    value={value}
+                    onChange={(e) => setValue(e.target.value)}
+                    placeholder={placeholder}
+                    autoFocus
+                    onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
+                    className="mb-4"
+                />
+                <div className="flex justify-end gap-3">
+                    <Button variant="secondary" onClick={handleClose}>{cancelText}</Button>
+                    <Button variant="primary" onClick={handleSubmit}>{submitText}</Button>
+                </div>
+            </div>
+        </div>
+    );
+}

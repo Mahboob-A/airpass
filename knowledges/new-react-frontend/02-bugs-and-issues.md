@@ -2,109 +2,75 @@
 
 **Priority Scale:** 🔴 Critical | 🟡 Medium | 🟢 Low
 
+**Status:** ✅ = Fixed | ⚠️ = Partially Fixed | ❌ = Still Needs Work
+
 ---
 
 ## 🔴 Critical Issues
 
-### BUG-01: Missing `/join/:code` Route — Receiver Can't Join
+### BUG-01: Missing `/join/:code` Route — Receiver Can't Join ✅ FIXED
 
 **File:** `App.jsx` (line 10)
 
-The router only defines:
-```jsx
-<Route path="/" element={<LandingPage />} />
-<Route path="/room/:code" element={<RoomPage />} />
-```
+**Previous Issue:** When the initiator creates a room, the backend returns a `code`. The URL becomes `/room/new?action=create`, but the `code` in `useParams()` is literally `"new"`. If the user refreshes, the page reconnects with `code = "new"` and `action = "create"`, creating a *new* room.
 
-But `LandingPage.handleJoinRoom()` navigates to `/room/${code}` which opens `RoomPage`. The problem is that `RoomPage` checks `searchParams.get('action')` — when joining, `action` is `null` (not `'create'`), so `isInitiator = false`. However, the `code` param is `'new'` when creating (`/room/new?action=create`) vs an actual code when joining (`/room/XYZABC`).
-
-**The actual bug:** When the initiator creates a room, the backend returns a `code`. The URL becomes `/room/new?action=create`, but the `code` in `useParams()` is literally `"new"`. On the `room-created` event, `setRoomInfo(msg.code, msg.url)` sets the correct code in the store — but the URL still shows `/room/new`. If the user refreshes, the page reconnects with `code = "new"` and `action = "create"`, creating a *new* room.
-
-**Fix:** After `room-created`, navigate to `/room/${msg.code}` to update the URL, or use a dedicated `/create` route.
+**Fix Applied:** After `room-created` event, use React Router's `navigate()` to update the URL to `/room/${msg.code}` with `replace: true`.
 
 ---
 
-### BUG-02: `RoomPage` Cleanup References Non-existent Property
+### BUG-02: `RoomPage` Cleanup References Non-existent Property ✅ FIXED
 
 **File:** `RoomPage.jsx` (line 133)
 
-```js
-if (signalingClient && signalingClient.ws) signalingClient.ws.close();
-```
+**Previous Issue:** Code referenced `signalingClient.ws.close()` but `SignalingClient` stores the WebSocket as `this._ws` (private).
 
-`SignalingClient` stores the WebSocket as `this._ws` (private), not `this.ws`. This cleanup code never actually closes the WebSocket.
-
-**Fix:** Use `signalingClient.close()` which is the public API:
-```js
-signalingClient?.close();
-```
+**Fix Applied:** Uses `signalingClient?.close()` which is the public API.
 
 ---
 
-### BUG-03: `TransferDashboard` References Wrong `progressStats` Fields
+### BUG-03: `TransferDashboard` References Wrong `progressStats` Fields ✅ FIXED
 
 **File:** `TransferDashboard.jsx` (line 98)
 
-```jsx
-{formatTime(transfer.progressStats.eta)} left • {formatBytes(transfer.progressStats.speed)}/s
-```
+**Previous Issue:** Referenced `transfer.progressStats.eta` and `transfer.progressStats.speed` which don't exist.
 
-But `calculateProgress()` in `transfer.js` returns `{ humanSpeed, humanEta, etaSeconds, speedBps }` — there is no `.eta` or `.speed` field. This will render `undefined left • undefined/s`.
-
-**Fix:** Use the correct field names:
-```jsx
-{transfer.progressStats.humanEta} left • {transfer.progressStats.humanSpeed}
-```
-Or use `etaSeconds`/`speedBps` with formatters:
-```jsx
-{formatTime(transfer.progressStats.etaSeconds)} left • {formatBytes(transfer.progressStats.speedBps)}/s
-```
+**Fix Applied:** Uses correct field names `transfer.progressStats.humanEta` and `transfer.progressStats.humanSpeed`.
 
 ---
 
-### BUG-04: `receiveChunk` Missing `totalChunks` from Return Value
+### BUG-04 & BUG-09: Stale State in handleBinaryChunk ✅ FIXED
 
-**File:** `transfer.js` (lines 111–122)
+**File:** `useTransferLogic.js` (lines 124–162)
 
-The original spec's `receiveChunk` returns `{ index, received, isComplete }`. The React version returns only `{ index }`:
-```js
-return { index }
-```
+**Previous Issue:** 
+1. The `writer` branch recalculated `state.chunksReceived + 1` inside a while loop without actually updating state between iterations.
+2. The `else` (blob fallback) branch had the same stale state issue.
 
-The `received` and `isComplete` fields are gone. The `handleBinaryChunk` in `useTransferLogic.js` manually counts chunks instead — but for the `writer` branch (lines 124–162), it recalculates `state.chunksReceived + 1` **inside a while loop** without actually updating state between iterations. The `state.chunksReceived` and `state.bytesReceived` will be stale during the loop, causing **incorrect progress tracking for out-of-order chunks**.
-
-**Fix:** Either restore `received`/`isComplete` to `receiveChunk`, or fix the stale state issue by accumulating locally within the loop.
+**Fix Applied:** Both branches now use local cumulative variables (`cumulativeBytes`, `cumulativeChunks`, `cumulativeSamples`) that are properly accumulated within the loop.
 
 ---
 
 ## 🟡 Medium Issues
 
-### BUG-05: Password Exposed in URL Query Parameters
+### BUG-05: Password Exposed in URL Query Parameters ✅ FIXED
 
-**File:** `LandingPage.jsx` (line 18)
+**File:** `LandingPage.jsx`, `RoomPage.jsx`, `store/index.js`
 
-```js
-let url = '/room/new?action=create';
-if (createPassword) url += `&password=${encodeURIComponent(createPassword)}`;
-```
+**Previous Issue:** Password was passed in URL query parameters, exposing it in browser history.
 
-The password appears in the browser URL bar, browser history, and any analytics. The spec explicitly states: *"Password is never sent to the server (not even hashed)"*
-
-**Fix:** Store the password in Zustand state and pass it via store, not URL params. The `RoomPage` already has access to the store.
+**Fix Applied:** 
+- Create room: Password stored in Zustand via `setPassword()` before navigation
+- Join room: Password prompted via `window.prompt()` and sent via WebSocket verification
 
 ---
 
-### BUG-06: `useTransferLogic` Accesses Private `_pc` Property
+### BUG-06: `useTransferLogic` Accesses Private `_pc` Property ✅ FIXED
 
 **File:** `useTransferLogic.js` (line 224)
 
-```js
-if (!peerConn || (peerConn._pc.iceConnectionState !== 'connected' && ...))
-```
+**Previous Issue:** Code accessed `peerConn._pc.iceConnectionState` which is a private property.
 
-This accesses the private `_pc` field of `PeerConnection`. If the class is refactored, this will break silently.
-
-**Fix:** Add a public getter to `PeerConnection`:
+**Fix Applied:** `PeerConnection` now has a public `iceConnectionState` getter:
 ```js
 get iceConnectionState() {
     return this._pc?.iceConnectionState ?? 'new';
@@ -113,96 +79,99 @@ get iceConnectionState() {
 
 ---
 
-### BUG-07: `cn()` Utility Duplicated
+### BUG-07: `cn()` Utility Duplicated ✅ FIXED
 
-- `src/lib/utils.js` — simple `filter(Boolean).join(' ')` version
-- `src/components/ui/index.jsx` — full `twMerge(clsx(...))` version
+**File:** `src/lib/utils.js`, `src/components/ui/index.jsx`
 
-Components import from different locations. `FileDropZone.jsx` uses `lib/utils` (no merge), `ui/index.jsx` uses `clsx + twMerge` (proper merge).
+**Previous Issue:** Components imported `cn` from different locations with different implementations.
 
-**Fix:** Delete `src/lib/utils.js` and import from `src/components/ui/index.jsx` everywhere. Or better: move `cn` to `lib/utils.js` with the `twMerge(clsx(...))` implementation and import it from there.
+**Fix Applied:** `lib/utils.js` now uses `twMerge(clsx(...))` implementation. All components import from `lib/utils`.
 
 ---
 
-### BUG-08: `useRoomStore.joinCode` Used for Both Room Code and Password
+### BUG-08: `useRoomStore.joinCode` Used for Both Room Code and Password ✅ FIXED
 
 **File:** `useTransferLogic.js` (line 8)
 
-```js
-const { peerConn, joinCode: roomPassword, ... } = useRoomStore();
-```
+**Previous Issue:** `joinCode` was aliased as `roomPassword` causing confusion.
 
-`joinCode` in the store is set to `msg.code` (the 6-char room code), but it's aliased as `roomPassword`. This is never actually used since `password` is passed down as a function argument, but the naming confusion could cause bugs during maintenance.
-
-**Fix:** Don't alias `joinCode` as `roomPassword`. If a password field is needed, add it to the store explicitly.
+**Fix Applied:** The alias has been removed. Password handling is separate from room code.
 
 ---
 
-### BUG-09: Stale `state` in `handleBinaryChunk` Writer Branch
+### BUG-09: Stale State in handleBinaryChunk Writer Branch ✅ FIXED
 
-**File:** `useTransferLogic.js` (lines 124–162)
-
-Inside the `while` loop, `state` is read once before the loop but modified throughout:
-```js
-const newBytesReceived = state.bytesReceived + rawChunk.byteLength;
-...
-const chunksReceived = state.chunksReceived + 1;
-```
-
-After the first iteration, `state.bytesReceived` and `state.chunksReceived` are still the original values. Each iteration adds the same base values plus one chunk, **not** cumulative values.
-
-**Fix:** Track cumulative values locally:
-```js
-let cumulativeBytes = state.bytesReceived;
-let cumulativeChunks = state.chunksReceived;
-
-while (chunkStore[nextChunkToWrite]) {
-    cumulativeBytes += rawChunk.byteLength;
-    cumulativeChunks++;
-    // ... use cumulativeBytes and cumulativeChunks
-}
-```
+*(See BUG-04 above — fixed together)*
 
 ---
 
 ## 🟢 Low Issues
 
-### BUG-10: `selectDownloadStrategy` Warning Threshold Changed from Spec
+### BUG-10: `selectDownloadStrategy` Warning Threshold Changed from Spec ⚠️ DOCUMENTED
 
 **File:** `transfer.js` (line 287)
 
-The spec uses 1 GB as the warning threshold for Strategy 1 (Memory Blob). The React version uses 250 MB:
-```js
-const mbLimit = 250 * 1024 * 1024; // 250 MB
-```
+**Issue:** Spec uses 1 GB threshold, but React version uses 250 MB (more conservative).
 
-This is actually more conservative (arguably better), but it deviates from the spec. The warning message also differs from the spec's wording.
-
-**Impact:** Low — more conservative is safer. But should be documented if intentional.
+**Decision:** Keep 250 MB threshold as it's safer. Documented as intentional deviation.
 
 ---
 
-### BUG-11: `dummy.test.js` Should Be Removed
+### BUG-11: `dummy.test.js` Should Be Removed ✅ FIXED
 
-A test file that only asserts `true === true` doesn't provide value and adds noise to the test output.
+**Issue:** Dummy test file existed.
+
+**Fix Applied:** File was removed during migration.
 
 ---
 
-### BUG-12: No 404/Catch-All Route
+### BUG-12: No 404/Catch-All Route ✅ FIXED
 
 **File:** `App.jsx`
 
-Invalid URLs render a blank page. Should add a catch-all route:
+**Fix Applied:** Added catch-all route:
 ```jsx
-<Route path="*" element={<Navigate to="/" />} />
+<Route path="*" element={<Navigate to="/" replace />} />
 ```
 
 ---
 
-### BUG-13: `formatBytes` Duplicated in Two Files
+### BUG-13: `formatBytes` Duplicated in Two Files ✅ FIXED
 
-`formatBytes` exists in both:
-- `src/lib/format.js`
-- `src/hooks/useTransferLogic.js` (local function, line 308)
+**File:** `useTransferLogic.js`
 
-**Fix:** Remove the local copy from `useTransferLogic.js` and import from `lib/format.js`.
+**Previous Issue:** Local `formatBytes` function existed alongside the canonical version in `lib/format.js`.
+
+**Fix Applied:** Removed local copy and imports from `lib/format.js`.
+
+---
+
+### BUG-14: RoomPage.jsx StrictMode Cleanup ✅ FIXED
+
+**File:** `RoomPage.jsx`
+
+**Issue:** React StrictMode could cause orphan WebSocket connections.
+
+**Fix Applied:** Added `isCancelled` flag to prevent orphan socket creation after unmount.
+
+---
+
+## Summary
+
+| Bug | Priority | Status |
+|-----|----------|--------|
+| BUG-01: Room URL navigation | 🔴 Critical | ✅ Fixed |
+| BUG-02: WebSocket cleanup | 🔴 Critical | ✅ Fixed |
+| BUG-03: Wrong progressStats fields | 🔴 Critical | ✅ Fixed |
+| BUG-04 & BUG-09: Stale state | 🔴 Critical | ✅ Fixed |
+| BUG-05: Password in URL | 🟡 Medium | ✅ Fixed |
+| BUG-06: Private _pc access | 🟡 Medium | ✅ Fixed |
+| BUG-07: Duplicate cn() | 🟡 Medium | ✅ Fixed |
+| BUG-08: joinCode alias | 🟡 Medium | ✅ Fixed |
+| BUG-10: Memory limit deviation | 🟢 Low | ⚠️ Documented |
+| BUG-11: dummy.test.js | 🟢 Low | ✅ Fixed |
+| BUG-12: No 404 route | 🟢 Low | ✅ Fixed |
+| BUG-13: Duplicate formatBytes | 🟢 Low | ✅ Fixed |
+| BUG-14: StrictMode cleanup | 🟢 Low | ✅ Fixed |
+
+**All bugs have been addressed.** The codebase is now ready for testing.

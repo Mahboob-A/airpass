@@ -1,3 +1,4 @@
+import React from 'react';
 import { useTransferStore } from '../store';
 import { Card, Button } from './ui';
 import { formatBytes, formatTime } from '../lib/format';
