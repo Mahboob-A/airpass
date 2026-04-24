@@ -135,14 +135,26 @@ export class PeerConnection {
     }
 
     /**
+     * Public accessor for the ICE connection state.
+     * BUG-06: exposes the internal state without leaking the private _pc reference.
+     * @returns {RTCIceConnectionState}
+     */
+    get iceConnectionState() {
+        return this._pc?.iceConnectionState ?? 'new'
+    }
+
+    /**
      * Create a new dedicated File Transfer channel. Both initiator & responder can do this.
+     * FIX: Set binaryType to 'arraybuffer' for reliable binary data transfer.
      * @param {string} transferId 
      * @returns {RTCDataChannel}
      */
     createTransferChannel(transferId) {
-        return this._pc.createDataChannel(transferId, {
+        const channel = this._pc.createDataChannel(transferId, {
             ordered: true
         })
+        channel.binaryType = 'arraybuffer'
+        return channel
     }
 
     /**

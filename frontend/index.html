@@ -2,47 +2,21 @@
 <html lang="en">
 
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AirPass - Secure P2P File Transfer</title>
-    <!-- We will rely on vanilla CSS later, for now just semantic structure -->
-    <link rel="stylesheet" href="/css/style.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AirPass - Secure P2P File Transfer</title>
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@500;600;700&display=swap"
+    rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/streamsaver@2.0.6/StreamSaver.min.js"></script>
 </head>
 
 <body>
-    <main class="container base-layout">
-        <header>
-            <h1>AirPass</h1>
-            <p>Direct, secure, peer-to-peer file transfer. No servers keep your data.</p>
-        </header>
-
-        <section class="actions-section">
-            <div class="card">
-                <h2>Create a Room</h2>
-                <p>Start a new secure session to share files.</p>
-                <div style="margin-bottom: 1rem;">
-                    <input type="password" id="input-create-password" placeholder="Optional password"
-                        autocomplete="new-password">
-                </div>
-                <button id="btn-create-room" class="btn primary">Create Room</button>
-            </div>
-
-            <div class="card">
-                <h2>Join a Room</h2>
-                <p>Enter a 6-digit code to connect with a peer.</p>
-                <form id="join-form">
-                    <input type="text" id="input-room-code" placeholder="Enter 6-digit code" maxlength="6"
-                        pattern="[a-zA-Z0-9]{6}" required autocomplete="off">
-                    <button type="submit" id="btn-join-room" class="btn secondary">Join</button>
-                </form>
-            </div>
-        </section>
-
-        <div id="status" class="status-waiting hidden">Idle</div>
-    </main>
-
-    <!-- App entry point for index -->
-    <script type="module" src="/js/app.js"></script>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
 </body>
 
 </html>

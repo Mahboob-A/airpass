@@ -32,9 +32,10 @@ yarn-error.log*
 *.swp
 *.swo
 
+srm-university-docs/
 
 # --- Security ---
 ssl/certs/*.pem
 *.key
 *.crt
-
+info.txt
